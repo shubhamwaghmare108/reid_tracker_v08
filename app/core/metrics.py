@@ -19,7 +19,7 @@ CSV_COLUMNS = ('session_id frame timestamp event_type track_id identity track_st
                'current_identity previous_track_state current_track_state gallery_action presence_event '
                'face_index person_index best_face_person_score second_best_face_person_score face_person_margin '
                'face_person_result face_count inference_time_ms').split()
-CSV_COLUMNS += ('best_score second_best_score recovery_margin').split()
+CSV_COLUMNS += ('best_score second_best_score association_margin recovery_margin').split()
 
 TRACK_STATE_NAMES = {0: 'TENTATIVE', 1: 'CONFIRMED', 2: 'OCCLUDED', 3: 'RECOVERED', 4: 'LOST', 5: 'DELETED'}
 IDENTITY_STATE_NAMES = {0: 'UNKNOWN', 1: 'CANDIDATE', 2: 'CONFIRMED', 3: 'RETAINED'}
@@ -75,8 +75,6 @@ class MetricsCollector:
             if event_type.startswith('GALLERY_UPDATE_'): data['gallery_update_attempts'] += event_type == 'GALLERY_UPDATE_ATTEMPT'; data['gallery_updates_accepted'] += event_type == 'GALLERY_UPDATE_ACCEPTED'; data['gallery_updates_rejected'] += event_type == 'GALLERY_UPDATE_REJECTED'
         if event_type == 'IDENTITY_CONFIRMED' and identity and identity != 'Unknown':
             identity_metrics = self.identity_data[identity]
-            # A fragment is a known identity that reappears under another tracker ID;
-            # unknown track creation is intentionally excluded.
             if identity_metrics['confirmed'] and track_id not in identity_metrics['track_ids']:
                 self.counters['TRACK_FRAGMENT'] += 1
                 self.record('TRACK_FRAGMENT', frame, timestamp, track, identity=identity)
@@ -94,7 +92,7 @@ class MetricsCollector:
         if event_type == 'IDENTITY_OWNER_CONFLICT': self.rejections['IDENTITY_OWNER_CONFLICT'] += 1
         if event_type == 'GALLERY_UPDATE_REJECTED': self.rejections[values.get('rejection_reason', 'GALLERY_REJECT_OTHER')] += 1
         if not self.event_logging or (event_type == 'DETECTION' and not self.log_detections): return
-        row = {key: '' for key in CSV_COLUMNS}; row.update(values)
+        row = {key: '' for key in CSV_COLUMNS}; row.update({key: value for key, value in values.items() if key in CSV_COLUMNS})
         track_state = getattr(track, 'state', '')
         identity_state = getattr(track, 'identity_state', '')
         row.update(session_id=self.session.get('session_id', ''), frame=frame, timestamp=f'{timestamp:.3f}', event_type=event_type, track_id=track_id, identity=identity,
