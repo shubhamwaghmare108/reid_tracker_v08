@@ -1,9 +1,11 @@
 """Core package initialization and V08.3.1 runtime tuning."""
 from app.core import reid_safety as _reid_safety
+from app.core.metrics import MetricsCollector
 
 _Tracker = _reid_safety.ReIDTracker
 _BaseGate = _Tracker._passes_association_gates
 _BaseAssociate = _Tracker._associate_detections
+_BaseMetricsRecord = MetricsCollector.record
 _OriginalNewTrackConflicts = _reid_safety._original_new_track_conflicts
 
 
@@ -69,6 +71,30 @@ def _associate_detections(self, tracks, boxes, bodies, faces, recovery=False):
     return matches, sorted(set(unmatched_tracks)), unmatched_dets
 
 
+def _metrics_record(self, event_type, frame, track=None, **values):
+    """Prevent duplicate deletion events from inflating lifecycle metrics."""
+    if event_type == 'TRACK_DELETED' and track is not None:
+        seen = getattr(self, '_v0831_deleted_events', None)
+        if seen is None:
+            seen = set()
+            self._v0831_deleted_events = seen
+        key = (int(frame), int(track.tracker_id))
+        if key in seen:
+            return
+        seen.add(key)
+    return _BaseMetricsRecord(self, event_type, frame, track=track, **values)
+
+
+def _identity_assignment(self):
+    """Run normal identity assignment and record a one-time gallery diagnostic."""
+    if self.frame_count == 1:
+        self._record_metric('GALLERY_STATUS', count=len(getattr(self.gallery, 'names', [])),
+                            body_count=int(getattr(getattr(self.gallery, 'body_means', []), 'shape', [0])[0]) if getattr(self.gallery, 'body_means', None) is not None and getattr(self.gallery.body_means, 'ndim', 0) > 0 else 0)
+    return _BaseIdentityAssignment(self)
+
+
+_BaseIdentityAssignment = _Tracker._frame_level_identity_assignment
+
 # reid_safety._association_score resolves _passes_association_gates by module
 # global lookup, so replace that module reference as well as the class method.
 _reid_safety._passes_association_gates = _passes_association_gates
@@ -76,3 +102,5 @@ _Tracker._face_refresh_needed = _face_refresh_needed
 _Tracker._passes_association_gates = _passes_association_gates
 _Tracker._associate_detections = _associate_detections
 _Tracker._new_track_conflicts = _safe_new_track_conflicts
+_Tracker._frame_level_identity_assignment = _identity_assignment
+MetricsCollector.record = _metrics_record
