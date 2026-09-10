@@ -6,7 +6,7 @@ import torch
 
 class FeatureExtractor:
     """Adapter around TorchReID with validated, normalized descriptors."""
-    def __init__(self, model_name: str = 'osnet_x1_x0', model_path: str | None = '', device: str = 'cpu'):
+    def __init__(self, model_name: str = 'osnet_x1_0', model_path: str | None = '', device: str = 'cpu'):
         try:
             from torchreid.utils import FeatureExtractor as TorchExtractor
         except ModuleNotFoundError:
@@ -14,8 +14,6 @@ class FeatureExtractor:
         self.extractor = TorchExtractor(model_name=model_name, model_path=model_path if model_path else None,
                                         device=device, verbose=False)
         self.device = device
-        # OSNet x1_0 is a 512-D model. Discover the dimension from the first
-        # successful inference rather than silently accepting incompatible data.
         self.feature_dim: int | None = None
 
     @staticmethod
@@ -50,10 +48,7 @@ class FeatureExtractor:
             raise TypeError('Re-ID extractor is not callable')
         with torch.no_grad():
             feature = invoke(rgb_batch)
-        if isinstance(feature, torch.Tensor):
-            result = feature.detach().cpu().numpy()
-        else:
-            result = np.asarray(feature)
+        result = feature.detach().cpu().numpy() if isinstance(feature, torch.Tensor) else np.asarray(feature)
         return self._validate_rows(result, expected_count=expected_count)
 
     def extract(self, image: np.ndarray) -> np.ndarray:
@@ -64,7 +59,7 @@ class FeatureExtractor:
         return self._run_model(rgb, expected_count=1)[0]
 
     def batch_extract(self, images: list[np.ndarray]) -> list[np.ndarray]:
-        """Extract one descriptor per valid crop; never silently shifts outputs."""
+        """Extract one descriptor per valid crop without shifting detection order."""
         if not images:
             return []
         rgb_batch = []
