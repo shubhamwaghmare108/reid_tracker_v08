@@ -32,6 +32,18 @@ def database_timestamp() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _resolve_device(device: str) -> str:
+    """Resolve the project-level ``auto`` device to a PyTorch device string."""
+    normalized = str(device or 'auto').strip().lower()
+    if normalized != 'auto':
+        return normalized
+    try:
+        import torch
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    except Exception:
+        return 'cpu'
+
+
 @dataclass(frozen=True)
 class TrackingConfig:
     """Settings controlling frame scheduling and expensive inference."""
@@ -130,6 +142,7 @@ class Settings:
 
     def __post_init__(self) -> None:
         """Normalize derived paths and nested configuration."""
+        self.device = _resolve_device(self.device)
         self.gallery_dir = self.gallery_dir or self.project_root / 'known_people'
         self.output_dir = self.output_dir or self.project_root / 'output'
         detector_path = Path(self.detector_model)
