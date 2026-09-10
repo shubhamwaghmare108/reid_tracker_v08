@@ -4,7 +4,6 @@ from app.core import reid_safety as _reid_safety
 _Tracker = _reid_safety.ReIDTracker
 _BaseGate = _Tracker._passes_association_gates
 _BaseAssociate = _Tracker._associate_detections
-_BaseCost = _Tracker._compute_association_cost
 _OriginalNewTrackConflicts = _reid_safety._original_new_track_conflicts
 
 
@@ -53,24 +52,6 @@ def _passes_association_gates(self, track, box, body, face, recovery=False):
     return _BaseGate(self, track, box, body, face, recovery=False)
 
 
-def _compute_association_cost(self, track, box, body, face, recovery=False):
-    """Make the adaptive gate above effective inside the original scorer too."""
-    old_threshold = self.recovery_reid_threshold
-    old_scale = self.association_max_scale_change
-    try:
-        if recovery:
-            self.recovery_reid_threshold = min(old_threshold, .50)
-            self.association_max_scale_change = max(old_scale, 3.25)
-        else:
-            _, b, f = self._gallery_similarity(track, body, face)
-            if max(b, f) >= .45 or self._compute_iou(track.predicted_bbox, box) >= .12:
-                self.association_max_scale_change = max(old_scale, 3.25)
-        return _BaseCost(self, track, box, body, face, recovery)
-    finally:
-        self.recovery_reid_threshold = old_threshold
-        self.association_max_scale_change = old_scale
-
-
 def _associate_detections(self, tracks, boxes, bodies, faces, recovery=False):
     """Skip recovery cooldown tracks instead of evaluating doomed pairs."""
     if not recovery:
@@ -88,8 +69,10 @@ def _associate_detections(self, tracks, boxes, bodies, faces, recovery=False):
     return matches, sorted(set(unmatched_tracks)), unmatched_dets
 
 
+# reid_safety._association_score resolves _passes_association_gates by module
+# global lookup, so replace that module reference as well as the class method.
+_reid_safety._passes_association_gates = _passes_association_gates
 _Tracker._face_refresh_needed = _face_refresh_needed
 _Tracker._passes_association_gates = _passes_association_gates
-_Tracker._compute_association_cost = _compute_association_cost
 _Tracker._associate_detections = _associate_detections
 _Tracker._new_track_conflicts = _safe_new_track_conflicts
