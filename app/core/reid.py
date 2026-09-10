@@ -5,52 +5,48 @@ import torch
 
 
 class FeatureExtractor:
-    """Adapter around TorchReID with one normalized vector per person crop.
-
-    OpenCV supplies BGR ``H x W x 3`` arrays, while TorchReID expects RGB
-    images and performs its own resize, tensor conversion, and batching. This
-    class keeps that library-specific boundary in one place.
-    """
-    def __init__(self, model_name: str = 'osnet_x1_0', model_path: str | None = '', device: str = 'cpu'):
-        """Load TorchReID while supporting both package layouts in use.
-
-        The project has been run with releases exposing the extractor from
-        either ``torchreid.utils`` or ``torchreid.reid.utils``. The fallback
-        keeps the application independent of that packaging difference.
-        """
+    """Adapter around TorchReID with validated, normalized descriptors."""
+    def __init__(self, model_name: str = 'osnet_x1_x0', model_path: str | None = '', device: str = 'cpu'):
         try:
             from torchreid.utils import FeatureExtractor as TorchExtractor
         except ModuleNotFoundError:
             from torchreid.reid.utils import FeatureExtractor as TorchExtractor
-        self.extractor = TorchExtractor(
-            model_name=model_name,
-            model_path=model_path if model_path else None,
-            device=device,
-            verbose=False
-        )
+        self.extractor = TorchExtractor(model_name=model_name, model_path=model_path if model_path else None,
+                                        device=device, verbose=False)
         self.device = device
+        # OSNet x1_0 is a 512-D model. Discover the dimension from the first
+        # successful inference rather than silently accepting incompatible data.
+        self.feature_dim: int | None = None
 
     @staticmethod
     def _normalize(feature: np.ndarray) -> np.ndarray:
-        """Convert one feature to float32 and unit length for cosine scoring."""
         feature = np.asarray(feature, dtype=np.float32).reshape(-1)
-        norm = np.linalg.norm(feature)
-        if norm > 1e-12:
-            feature = feature / norm
-        return feature
+        if feature.size == 0 or not np.isfinite(feature).all():
+            raise ValueError('Invalid Re-ID feature: empty or non-finite')
+        norm = float(np.linalg.norm(feature))
+        if not np.isfinite(norm) or norm <= 1e-12:
+            raise ValueError('Invalid Re-ID feature: zero norm')
+        return feature / norm
 
-    def _run_model(self, rgb_batch):
-        """Invoke TorchReID without gradients and normalize its returned rows.
+    def _validate_rows(self, result, expected_count: int | None = None):
+        result = np.asarray(result, dtype=np.float32)
+        if result.size == 0:
+            raise ValueError('Re-ID model returned no features')
+        if result.ndim == 1:
+            result = result.reshape(1, -1)
+        elif result.ndim != 2:
+            raise ValueError(f'Re-ID model returned unexpected shape: {result.shape}')
+        if expected_count is not None and result.shape[0] != expected_count:
+            raise ValueError(f'Re-ID output count mismatch: expected {expected_count}, got {result.shape[0]}')
+        if self.feature_dim is None:
+            self.feature_dim = int(result.shape[1])
+        if result.shape[1] != self.feature_dim:
+            raise ValueError(f'Re-ID dimension mismatch: expected {self.feature_dim}, got {result.shape[1]}')
+        return np.stack([self._normalize(row) for row in result], axis=0)
 
-        ``rgb_batch`` may be one image or a list of images. The underlying
-        TorchReID extractor owns preprocessing, so this method intentionally
-        does not convert a list into a NumPy 4D array.
-        """
-        if callable(self.extractor):
-            invoke = self.extractor
-        elif hasattr(self.extractor, '__call__'):
-            invoke = self.extractor.__call__
-        else:
+    def _run_model(self, rgb_batch, expected_count: int | None = None):
+        invoke = self.extractor if callable(self.extractor) else getattr(self.extractor, '__call__', None)
+        if invoke is None:
             raise TypeError('Re-ID extractor is not callable')
         with torch.no_grad():
             feature = invoke(rgb_batch)
@@ -58,49 +54,25 @@ class FeatureExtractor:
             result = feature.detach().cpu().numpy()
         else:
             result = np.asarray(feature)
-        if result.size == 0:
-            return np.empty((0,), dtype=np.float32)
-        result = np.asarray(result, dtype=np.float32)
-        if result.ndim == 1:
-            return self._normalize(result)
-        if result.ndim == 2 and result.shape[0] == 1:
-            return self._normalize(result[0])
-        return np.stack([self._normalize(item) for item in result], axis=0)
+        return self._validate_rows(result, expected_count=expected_count)
 
     def extract(self, image: np.ndarray) -> np.ndarray:
         """Extract one descriptor from an OpenCV BGR crop."""
         if image is None or image.size == 0:
             raise ValueError('Empty crop')
-        if image.ndim == 3 and image.shape[2] == 3:
-            rgb = image[:, :, ::-1].copy()
-        else:
-            rgb = image
-        return self._run_model(rgb)
+        rgb = image[:, :, ::-1].copy() if image.ndim == 3 and image.shape[2] == 3 else image
+        return self._run_model(rgb, expected_count=1)[0]
 
     def batch_extract(self, images: list[np.ndarray]) -> list[np.ndarray]:
-        """Extract descriptors for several crops with one TorchReID call.
-
-        Empty crops are omitted because TorchReID cannot transform them. The
-        tracker owns the original detection-to-crop index mapping, so this
-        method only returns descriptors for valid inputs in list order.
-        """
+        """Extract one descriptor per valid crop; never silently shifts outputs."""
         if not images:
             return []
         rgb_batch = []
         for image in images:
             if image is None or image.size == 0:
                 continue
-            if image.ndim == 3 and image.shape[2] == 3:
-                rgb_batch.append(image[:, :, ::-1].copy())
-            else:
-                rgb_batch.append(image)
+            rgb_batch.append(image[:, :, ::-1].copy() if image.ndim == 3 and image.shape[2] == 3 else image)
         if not rgb_batch:
             return []
-        # TorchReID accepts a list of HWC images and stacks them after applying
-        # its per-image torchvision transform. Pre-stacking here would make
-        # torchvision treat the whole batch as one image and raise the 4D
-        # ``pic should be 2/3 dimensional`` error.
-        features = self._run_model(rgb_batch)
-        if features.ndim == 1:
-            return [self._normalize(features)]
-        return [self._normalize(feature) for feature in features]
+        features = self._run_model(rgb_batch, expected_count=len(rgb_batch))
+        return [feature for feature in features]
