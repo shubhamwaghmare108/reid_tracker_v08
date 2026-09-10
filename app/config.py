@@ -67,23 +67,23 @@ class Settings:
     hybrid_weight_body: float = 0.5
     hybrid_weight_face: float = 0.5
 
-    tracker_max_lost_frames: int = int(_setting('REID_TRACKER_MAX_LOST_FRAMES', '30'))
-    tracker_max_occlusion_frames: int = int(_setting('REID_TRACKER_MAX_OCCLUSION_FRAMES', '12'))
-    tracker_max_recovery_frames: int = int(_setting('REID_TRACKER_MAX_RECOVERY_FRAMES', '90'))
+    tracker_max_lost_frames: int = int(_setting('REID_TRACKER_MAX_LOST_FRAMES', '8'))
+    tracker_max_occlusion_frames: int = int(_setting('REID_TRACKER_MAX_OCCLUSION_FRAMES', '6'))
+    tracker_max_recovery_frames: int = int(_setting('REID_TRACKER_MAX_RECOVERY_FRAMES', '24'))
     tracker_max_trajectory_history: int = int(_setting('REID_TRACKER_MAX_TRAJECTORY_HISTORY', '30'))
     tracker_max_body_gallery: int = int(_setting('REID_TRACKER_MAX_BODY_GALLERY', '12'))
     tracker_max_face_gallery: int = int(_setting('REID_TRACKER_MAX_FACE_GALLERY', '6'))
     tracker_occlusion_iou_threshold: float = float(_setting('REID_TRACKER_OCCLUSION_IOU_THRESHOLD', '0.15'))
-    tracker_recovery_reid_threshold: float = float(_setting('REID_TRACKER_RECOVERY_REID_THRESHOLD', '0.72'))
+    tracker_recovery_reid_threshold: float = float(_setting('REID_TRACKER_RECOVERY_REID_THRESHOLD', '0.60'))
     tracker_motion_gate_threshold: float = float(_setting('REID_TRACKER_MOTION_GATE_THRESHOLD', '4.0'))
     tracker_turn_threshold: float = float(_setting('REID_TRACKER_TURN_THRESHOLD', '0.75'))
     tracker_motion_confidence_threshold: float = float(_setting('REID_TRACKER_MOTION_CONFIDENCE_THRESHOLD', '0.45'))
     tracker_gallery_update_threshold: float = float(_setting('REID_TRACKER_GALLERY_UPDATE_THRESHOLD', '0.72'))
-    tracker_normal_reid_gate: float = float(_setting('REID_TRACKER_NORMAL_REID_GATE', '0.35'))
+    tracker_normal_reid_gate: float = float(_setting('REID_TRACKER_NORMAL_REID_GATE', '0.30'))
     tracker_strong_reid_gate: float = float(_setting('REID_TRACKER_STRONG_REID_GATE', '0.55'))
-    tracker_normal_iou_gate: float = float(_setting('REID_TRACKER_NORMAL_IOU_GATE', '0.05'))
+    tracker_normal_iou_gate: float = float(_setting('REID_TRACKER_NORMAL_IOU_GATE', '0.03'))
     tracker_strong_reid_iou_bypass: float = float(_setting('REID_TRACKER_STRONG_REID_IOU_BYPASS', '0.70'))
-    tracker_low_motion_reid_gate: float = float(_setting('REID_TRACKER_LOW_MOTION_REID_GATE', '0.50'))
+    tracker_low_motion_reid_gate: float = float(_setting('REID_TRACKER_LOW_MOTION_REID_GATE', '0.45'))
     tracker_weak_motion_distance: float = float(_setting('REID_TRACKER_WEAK_MOTION_DISTANCE', '1.0'))
     tracker_prediction_velocity_decay: float = float(_setting('REID_TRACKER_PREDICTION_VELOCITY_DECAY', '0.70'))
     tracker_max_prediction_displacement_per_frame: float = float(_setting('REID_TRACKER_MAX_PREDICTION_DISPLACEMENT_PER_FRAME', '80.0'))
@@ -91,7 +91,7 @@ class Settings:
     tracker_prediction_uncertainty_growth: float = float(_setting('REID_TRACKER_PREDICTION_UNCERTAINTY_GROWTH', '0.25'))
     tracker_face_person_min_match_score: float = float(_setting('REID_TRACKER_FACE_PERSON_MIN_MATCH_SCORE', '0.35'))
     tracker_face_person_ambiguity_margin: float = float(_setting('REID_TRACKER_FACE_PERSON_AMBIGUITY_MARGIN', '0.10'))
-    tracker_recovery_motion_gate: float = float(_setting('REID_TRACKER_RECOVERY_MOTION_GATE', '8.0'))
+    tracker_recovery_motion_gate: float = float(_setting('REID_TRACKER_RECOVERY_MOTION_GATE', '6.0'))
     tracker_detection_dedup_iou: float = float(_setting('REID_TRACKER_DETECTION_DEDUP_IOU', '0.75'))
     tracker_min_detection_confidence: float = float(_setting('REID_TRACKER_MIN_DETECTION_CONFIDENCE', '0.35'))
     tracker_min_detection_width: int = int(_setting('REID_TRACKER_MIN_DETECTION_WIDTH', '20'))
@@ -99,17 +99,17 @@ class Settings:
     tracker_min_detection_area: int = int(_setting('REID_TRACKER_MIN_DETECTION_AREA', '1200'))
     tracker_duplicate_track_iou: float = float(_setting('REID_TRACKER_DUPLICATE_TRACK_IOU', '0.70'))
     tracker_duplicate_appearance_threshold: float = float(_setting('REID_TRACKER_DUPLICATE_APPEARANCE_THRESHOLD', '0.80'))
-    tracker_max_visual_occlusion_frames: int = int(_setting('REID_TRACKER_MAX_VISUAL_OCCLUSION_FRAMES', '12'))
+    tracker_max_visual_occlusion_frames: int = int(_setting('REID_TRACKER_MAX_VISUAL_OCCLUSION_FRAMES', '6'))
     tracker_identity_face_threshold: float = float(_setting('REID_TRACKER_IDENTITY_FACE_THRESHOLD', '0.72'))
     tracker_identity_body_candidate_threshold: float = float(_setting('REID_TRACKER_IDENTITY_BODY_CANDIDATE_THRESHOLD', '0.72'))
     tracker_identity_body_confirm_threshold: float = float(_setting('REID_TRACKER_IDENTITY_BODY_CONFIRM_THRESHOLD', '0.78'))
     tracker_identity_margin: float = float(_setting('REID_TRACKER_IDENTITY_MARGIN', '0.06'))
     tracker_identity_candidate_min_frames: int = int(_setting('REID_TRACKER_IDENTITY_CANDIDATE_MIN_FRAMES', '3'))
-    tracker_identity_retention_frames: int = int(_setting('REID_TRACKER_IDENTITY_RETENTION_FRAMES', '45'))
-    tracker_identity_lock_timeout: int = int(_setting('REID_TRACKER_IDENTITY_LOCK_TIMEOUT', '180'))
-    tracker_recovery_margin: float = float(_setting('REID_TRACKER_RECOVERY_MARGIN', '0.08'))
+    tracker_identity_retention_frames: int = int(_setting('REID_TRACKER_IDENTITY_RETENTION_FRAMES', '60'))
+    tracker_identity_lock_timeout: int = int(_setting('REID_TRACKER_IDENTITY_LOCK_TIMEOUT', '60'))
+    tracker_recovery_margin: float = float(_setting('REID_TRACKER_RECOVERY_MARGIN', '0.06'))
     tracker_association_min_iou: float = float(_setting('REID_TRACKER_ASSOCIATION_MIN_IOU', '0.01'))
-    tracker_association_max_scale_change: float = float(_setting('REID_TRACKER_ASSOCIATION_MAX_SCALE_CHANGE', '2.85'))
+    tracker_association_max_scale_change: float = float(_setting('REID_TRACKER_ASSOCIATION_MAX_SCALE_CHANGE', '2.50'))
     tracker_gallery_min_detection_confidence: float = float(_setting('REID_TRACKER_GALLERY_MIN_DETECTION_CONFIDENCE', '0.70'))
 
     metrics_enabled: bool = _setting('METRICS_ENABLED', 'true').lower() == 'true'
@@ -134,11 +134,7 @@ class Settings:
         self.output_dir = self.output_dir or self.project_root / 'output'
         detector_path = Path(self.detector_model)
         weights_path = Path(self.reid_weights)
-        if not detector_path.is_absolute():
-            self.detector_model = str(self.project_root / detector_path)
-        if not weights_path.is_absolute():
-            self.reid_weights = str(self.project_root / weights_path)
-        if not self.metrics_output_dir.is_absolute():
-            self.metrics_output_dir = self.project_root / self.metrics_output_dir
-        if not isinstance(self.tracking_config, TrackingConfig):
-            self.tracking_config = TrackingConfig(**self.tracking_config)
+        if not detector_path.is_absolute(): self.detector_model = str(self.project_root / detector_path)
+        if not weights_path.is_absolute(): self.reid_weights = str(self.project_root / weights_path)
+        if not self.metrics_output_dir.is_absolute(): self.metrics_output_dir = self.project_root / self.metrics_output_dir
+        if not isinstance(self.tracking_config, TrackingConfig): self.tracking_config = TrackingConfig(**self.tracking_config)
