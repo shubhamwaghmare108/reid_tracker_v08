@@ -2,13 +2,12 @@
 from __future__ import annotations
 from collections import Counter
 import logging
+import time
+import cv2
 import numpy as np
 from app.core import tracker as _tracker
 
 logger = logging.getLogger(__name__)
-
-# TorchReID OSNet x1_0 returns 512-D descriptors. Keep this explicit so a
-# legacy 256-D zero placeholder can never masquerade as a valid body feature.
 EXPECTED_BODY_DIM = 512
 
 
@@ -30,13 +29,10 @@ def validate_embedding(embedding, expected_dim: int | None = None):
     if not np.isfinite(value).all():
         return False, None, "NAN_OR_INF"
     norm = float(np.linalg.norm(value))
-    if not np.isfinite(norm):
-        return False, None, "NAN_OR_INF"
-    if norm <= 1e-8:
-        return False, None, "ZERO_NORM"
+    if not np.isfinite(norm) or norm <= 1e-8:
+        return False, None, "ZERO_NORM" if norm <= 1e-8 else "NAN_OR_INF"
     value = value.astype(np.float32, copy=False)
-    value = value / max(float(np.linalg.norm(value)), 1e-12)
-    return True, value, "OK"
+    return True, value / norm, "OK"
 
 
 _BaseTrack = _tracker.Track
@@ -44,11 +40,8 @@ _BaseTrack = _tracker.Track
 
 class SafeTrack(_BaseTrack):
     """Track that never lets an invalid ReID result overwrite valid state."""
-
     def __post_init__(self):
         super().__post_init__()
-        # The base V08 class historically inserted a 256-D zero vector for a
-        # missing first body descriptor. Remove that sentinel completely.
         if not validate_embedding(self.body_embedding, EXPECTED_BODY_DIM)[0]:
             self.body_embedding = None
         self.last_body_embedding = None
@@ -67,26 +60,100 @@ class SafeTrack(_BaseTrack):
 
     def update(self, box, body, face, confidence, update_gallery=False,
                recovered=False, detection_confidence=1.0):
-        # Body must be OSNet x1_0-compatible. Invalid results are converted to
-        # None, so BaseTrack.update leaves the previous valid descriptor intact.
         body = self._validated(body, self.body_embedding, EXPECTED_BODY_DIM)
-        # Face dimensions are discovered from the existing valid face embedding;
-        # this avoids hardcoding an InsightFace model-specific size.
         face = self._validated(face, self.face_embedding)
-        return super().update(
-            box, body, face, confidence,
-            update_gallery=update_gallery,
-            recovered=recovered,
-            detection_confidence=detection_confidence,
-        )
+        return super().update(box, body, face, confidence,
+                              update_gallery=update_gallery,
+                              recovered=recovered,
+                              detection_confidence=detection_confidence)
 
 
-# ReIDTracker resolves Track from its module globals at runtime. Replacing the
-# module-global class therefore hardens all normal Track construction paths.
+# Selective appearance refresh. The old V08 cadence refreshed every track in
+# the scene every N frames. That creates a CPU spike and makes one crossing
+# capable of triggering scene-wide ReID. Only detections belonging to new,
+# uncertain, occluded, stale, or overlapping tracks need fresh appearance.
+def _needs_fresh_appearance(self, boxes):
+    active = [t for t in self.tracks if t.state != self.TrackState.DELETED]
+    if not active:
+        return bool(boxes)
+    for box in boxes:
+        nearby = []
+        for track in active:
+            iou = self._compute_iou(track.predicted_bbox, box)
+            distance = self._distance(track.predicted_bbox, box) / self._scale(track.last_reliable_bbox)
+            nearby.append((iou, distance, track))
+        best_iou, best_distance, best = max(nearby, key=lambda x: x[0] - 0.02 * x[1])
+        if best.state in (self.TrackState.TENTATIVE, self.TrackState.OCCLUDED, self.TrackState.LOST):
+            return True
+        if best.reid_age >= self.reid_interval or best.prediction_uncertainty >= .25:
+            return True
+        if best_iou < self.association_min_iou and best_distance > self.weak_motion_distance:
+            return True
+        if any(self._compute_iou(box, other) >= .10 for other in boxes if other is not box):
+            return True
+    return False
+
+
+def _selective_extract_embeddings_batch(self, image, boxes, masks):
+    """Extract appearance only for detections that actually need it."""
+    started = time.perf_counter()
+    active = [t for t in self.tracks if t.state != self.TrackState.DELETED]
+    selected = []
+    for index, (box, mask) in enumerate(zip(boxes, masks)):
+        needs = not active
+        if active:
+            candidates = []
+            for track in active:
+                iou = self._compute_iou(track.predicted_bbox, box)
+                distance = self._distance(track.predicted_bbox, box) / self._scale(track.last_reliable_bbox)
+                candidates.append((iou - .02 * distance, iou, distance, track))
+            _, best_iou, best_distance, best = max(candidates, key=lambda x: x[0])
+            needs = (best.state in (self.TrackState.TENTATIVE, self.TrackState.OCCLUDED, self.TrackState.LOST)
+                     or best.reid_age >= self.reid_interval
+                     or best.prediction_uncertainty >= .25
+                     or (best_iou < self.association_min_iou and best_distance > self.weak_motion_distance))
+            if any(self._compute_iou(box, other) >= .10 for other in boxes if other is not box):
+                needs = True
+        if needs:
+            crop = self._prepare_reid_crop(image, box, mask)
+            if crop is not None and crop.size:
+                selected.append((index, crop))
+    prep_ms = (time.perf_counter() - started) * 1000.0
+    bodies = [None for _ in boxes]
+    inference_started = time.perf_counter()
+    if selected:
+        try:
+            crops = [crop for _, crop in selected]
+            extracted = self.extractor.batch_extract(crops) if hasattr(self.extractor, 'batch_extract') else [self.extractor.extract(c) for c in crops]
+            if len(extracted) != len(selected):
+                raise ValueError(f'ReID output count mismatch: expected {len(selected)}, got {len(extracted)}')
+            for (index, _), body in zip(selected, extracted):
+                ok, value, reason = validate_embedding(body, EXPECTED_BODY_DIM)
+                if ok:
+                    bodies[index] = value
+                else:
+                    logger.debug('REID_INVALID detection=%s reason=%s', index, reason)
+        except Exception:
+            logger.exception('Selective batch Re-ID extraction failed; preserving cached descriptors.')
+    self.last_profile['reid_preprocessing_ms'] = prep_ms
+    self.last_profile['reid_inference_ms'] = (time.perf_counter() - inference_started) * 1000.0
+    self.last_profile['reid_calls'] = 1 if selected else 0
+    self.last_profile['reid_crops'] = len(selected)
+    return bodies
+
+
 _tracker.Track = SafeTrack
+_tracker.TrackState = _tracker.TrackState
+_original_state = _tracker.TrackState
+# Expose the enum through the patched module exactly as before.
 Track = SafeTrack
 ReIDTracker = _tracker.ReIDTracker
 TrackState = _tracker.TrackState
 IdentityState = _tracker.IdentityState
 GateResult = _tracker.GateResult
 FacePersonMatch = _tracker.FacePersonMatch
+
+# Bind methods after class import so existing ReIDTracker instances use the
+# safer scheduling without changing its public constructor/API.
+ReIDTracker._appearance_refresh_required = _needs_fresh_appearance
+ReIDTracker._extract_embeddings_batch = _selective_extract_embeddings_batch
