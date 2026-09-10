@@ -5,6 +5,7 @@ import logging
 import time
 import numpy as np
 from app.core import tracker as _tracker
+from app.core.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 EXPECTED_BODY_DIM = 512
@@ -41,7 +42,6 @@ class SafeTrack(_BaseTrack):
     """Track that never lets an invalid ReID result overwrite valid state."""
     def __post_init__(self):
         super().__post_init__()
-        # Remove the legacy 256-D zero sentinel inserted by BaseTrack.
         body_ok, body_value, _ = validate_embedding(self.body_embedding)
         if body_ok:
             self.body_embedding = body_value
@@ -140,6 +140,17 @@ def _selective_extract_embeddings_batch(self, image, boxes, masks):
     self.last_profile['reid_calls'] = 1 if selected else 0
     self.last_profile['reid_crops'] = len(selected)
     return bodies
+
+
+# Keep metrics output aligned with the actual V08 code path. This fixes the
+# stale V06 label without replacing the existing metrics implementation.
+_original_start_session = MetricsCollector.start_session
+
+def _start_session_v08(self, video_name, fps, configuration):
+    _original_start_session(self, video_name, fps, configuration)
+    self.session['tracker_version'] = 'V08'
+
+MetricsCollector.start_session = _start_session_v08
 
 
 _tracker.Track = SafeTrack
