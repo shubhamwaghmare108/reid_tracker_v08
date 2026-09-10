@@ -41,12 +41,14 @@ class SafeTrack(_BaseTrack):
     """Track that never lets an invalid ReID result overwrite valid state."""
     def __post_init__(self):
         super().__post_init__()
-        # Remove the legacy 256-D zero sentinel inserted by BaseTrack. A real
-        # initial descriptor is allowed to establish its own dimension; the
-        # production FeatureExtractor separately validates OSNet's 512-D output.
-        if not validate_embedding(self.body_embedding)[0]:
+        # Remove the legacy 256-D zero sentinel inserted by BaseTrack.
+        body_ok, body_value, _ = validate_embedding(self.body_embedding)
+        if body_ok:
+            self.body_embedding = body_value
+            self.last_body_embedding = body_value.copy()
+        else:
             self.body_embedding = None
-        self.last_body_embedding = None
+            self.last_body_embedding = None
         self.reid_validation_stats = Counter()
 
     def _validated(self, embedding, current):
