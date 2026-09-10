@@ -27,9 +27,6 @@ from app.core.metrics import MetricsCollector
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Descriptor safety
-# ---------------------------------------------------------------------------
 def validate_embedding(embedding, expected_dim: int | None = None):
     """Return ``(valid, normalized_embedding, reason)`` without bad data."""
     if embedding is None:
@@ -82,8 +79,6 @@ class SafeTrack(_BaseTrack):
 
     def update(self, box, body, face, confidence, update_gallery=False,
                recovered=False, detection_confidence=1.0):
-        # Validate before the base Track can assign anything. None means
-        # "descriptor unavailable", not "replace the previous descriptor".
         body = self._validated(body, self.body_embedding)
         face = self._validated(face, self.face_embedding)
         return super().update(box, body, face, confidence,
@@ -92,9 +87,6 @@ class SafeTrack(_BaseTrack):
                               detection_confidence=detection_confidence)
 
 
-# ---------------------------------------------------------------------------
-# Event-driven appearance scheduling
-# ---------------------------------------------------------------------------
 def _crossing_pair(self, first, second):
     """Return True when two tracks are plausibly approaching/crossing."""
     iou = self._compute_iou(first.predicted_bbox, second.predicted_bbox)
@@ -111,7 +103,6 @@ def _crossing_pair(self, first, second):
     n1, n2 = float(np.linalg.norm(v1)), float(np.linalg.norm(v2))
     if n1 < 1e-3 or n2 < 1e-3:
         return False
-    # Negative dot product means opposing motion, the common crossing case.
     approaching = float(np.dot(v1 / n1, v2 / n2)) < -0.20
     relative = c2 - c1
     closing = float(np.dot(v1 - v2, relative)) > 0.0
@@ -119,11 +110,7 @@ def _crossing_pair(self, first, second):
 
 
 def _appearance_refresh_required_v081(self, boxes):
-    """Refresh appearance only for uncertain/new/occluded/crossing situations.
-
-    There is deliberately no ``frame_count % reid_interval`` scene cadence.
-    ``reid_interval`` remains a per-track stale-descriptor age limit.
-    """
+    """Refresh appearance only for uncertain/new/occluded/crossing situations."""
     active = [t for t in self.tracks if t.state != _tracker.TrackState.DELETED]
     if not active:
         return bool(boxes)
@@ -134,21 +121,15 @@ def _appearance_refresh_required_v081(self, boxes):
                            _tracker.TrackState.LOST):
             return True
         if track.reid_age >= self.reid_interval:
-            # A stale descriptor is enough to request a body refresh, but this
-            # does not imply a face refresh on every frame; face work is still
-            # performed only when this refresh is actually needed.
             return True
         if track.prediction_uncertainty >= 0.40 or track.motion_confidence < 0.30:
             return True
 
-    # Crossing is the one scene interaction that justifies an appearance pass.
     for i, first in enumerate(active):
         for second in active[i + 1:]:
             if self._crossing_pair(first, second):
                 return True
 
-    # If a detection has no plausible motion candidate, appearance can rescue
-    # it; stable detections otherwise stay motion/geometry-only.
     for box in boxes:
         if not any(self._distance(t.predicted_bbox, box) /
                    self._scale(t.last_reliable_bbox) <= self.motion_gate_threshold
@@ -184,8 +165,6 @@ def _selective_extract_embeddings_batch_v081(self, image, boxes, masks):
             if any(self._crossing_pair(best, other) for other in active if other is not best):
                 needs = True
 
-            # A strong cached descriptor is preferable to extracting body ReID
-            # for every stable detection just because another person is nearby.
             if best_iou >= 0.20 and best_distance <= 0.60 and best.state == _tracker.TrackState.CONFIRMED:
                 if best.reid_age < self.reid_interval and best.prediction_uncertainty < 0.40:
                     needs = False
@@ -224,16 +203,12 @@ def _selective_extract_embeddings_batch_v081(self, image, boxes, masks):
     return bodies
 
 
-# ---------------------------------------------------------------------------
-# Robust association
-# ---------------------------------------------------------------------------
 def _crossing_for_detection(self, track, box):
     """Check whether this track is in a local crossing interaction."""
     for other in self.tracks:
         if other is track or other.state == _tracker.TrackState.DELETED:
             continue
         if self._crossing_pair(track, other):
-            # Require the detection to be near one member of the interaction.
             if (self._compute_iou(other.predicted_bbox, box) >= 0.02 or
                     self._distance(other.predicted_bbox, box) /
                     self._scale(other.last_reliable_bbox) < 1.25):
@@ -263,8 +238,6 @@ def _passes_association_gates_v081(self, track, box, body, face, recovery=False)
     new_h = max(float(box[3] - box[1]), 1.0)
     wr, hr = new_w / old_w, new_h / old_h
     max_scale = self.association_max_scale_change
-    # Normal scale range is kept, but strong appearance/crossing may tolerate
-    # perspective-driven box changes. Only an extreme jump remains a hard fail.
     hard_scale = max_scale * (1.50 if (crossing or strong_app) else 1.0)
     if wr < 1.0 / hard_scale or wr > hard_scale or hr < 1.0 / hard_scale or hr > hard_scale:
         return _tracker.GateResult(False, 'SCALE_GATE_FAIL')
@@ -274,15 +247,10 @@ def _passes_association_gates_v081(self, track, box, body, face, recovery=False)
             return _tracker.GateResult(False, 'RECOVERY_REID_GATE_FAIL')
         return _tracker.GateResult(True)
 
-    # A disjoint detection is acceptable when reliable appearance agrees.
-    # Otherwise require at least weak geometric continuity.
     if iou < self.association_min_iou and not usable_app and distance > self.weak_motion_distance:
         return _tracker.GateResult(False, 'IOU_GATE_FAIL')
     if iou < self.normal_iou_gate and not usable_app and distance > self.weak_motion_distance:
         return _tracker.GateResult(False, 'NO_SAFE_MATCH')
-
-    # Do not hard-reject on a weak body descriptor during a crossing; let the
-    # global assignment + ambiguity margin decide instead.
     if self.valid(body) and b < self.normal_reid_gate and not crossing and iou < self.normal_iou_gate:
         return _tracker.GateResult(False, 'REID_GATE_FAIL')
     return _tracker.GateResult(True)
@@ -310,8 +278,6 @@ def _compute_association_cost_v081(self, track, box, body, face, recovery=False)
         motion_gate *= 1.50
     motion = max(0., 1. - distance / max(motion_gate, 1e-6))
 
-    # Scale consistency is a soft score. A value near 1 means little size
-    # change; it is intentionally not a hard gate here.
     old = track.last_reliable_bbox
     wr = (box[2] - box[0]) / max(old[2] - old[0], 1.0)
     hr = (box[3] - box[1]) / max(old[3] - old[1], 1.0)
@@ -327,8 +293,6 @@ def _compute_association_cost_v081(self, track, box, body, face, recovery=False)
         return 0.60 * appearance + 0.25 * motion + 0.10 * iou + 0.05 * scale_score
 
     if crossing:
-        # During a crossing, appearance must dominate. Motion and IoU are still
-        # useful but cannot overpower a reliable appearance match.
         if has_appearance:
             appearance = 0.70 * max(b, 0.) + 0.30 * max(f, 0.) if has_face else max(b, 0.)
             return 0.62 * appearance + 0.20 * motion + 0.10 * iou + 0.08 * scale_score
@@ -338,8 +302,6 @@ def _compute_association_cost_v081(self, track, box, body, face, recovery=False)
         appearance = 0.70 * max(b, 0.) + 0.30 * max(f, 0.) if has_face else max(b, 0.)
         return 0.42 * appearance + 0.30 * motion + 0.20 * iou + 0.08 * scale_score
 
-    # Missing ReID is neutral: do not subtract a score merely because no
-    # descriptor was produced on this frame.
     return 0.50 * motion + 0.32 * iou + 0.18 * scale_score
 
 
@@ -360,9 +322,6 @@ def _associate_detections_v081(self, tracks, boxes, bodies, faces, recovery=Fals
     rows, cols = linear_sum_assignment(cost)
     minimum = self.recovery_reid_threshold if recovery else 0.28
     matches, unmatched_tracks, unmatched_dets = [], list(range(len(tracks))), list(range(len(boxes)))
-
-    # Configurable ambiguity margin. Recovery keeps its stricter margin; normal
-    # crossings use the same safety principle with a slightly smaller margin.
     margin = self.recovery_margin if recovery else max(0.05, self.recovery_margin * 0.75)
     for row, col in zip(rows, cols):
         score = scores.get((row, col))
@@ -391,9 +350,6 @@ def _associate_detections_v081(self, tracks, boxes, bodies, faces, recovery=Fals
     return matches, unmatched_tracks, unmatched_dets
 
 
-# ---------------------------------------------------------------------------
-# Metrics version label
-# ---------------------------------------------------------------------------
 _original_start_session = MetricsCollector.start_session
 
 
@@ -402,9 +358,6 @@ def _start_session_v081(self, video_name, fps, configuration):
     self.session['tracker_version'] = 'V08.1'
 
 
-# ---------------------------------------------------------------------------
-# Install patches
-# ---------------------------------------------------------------------------
 _tracker.Track = SafeTrack
 Track = SafeTrack
 ReIDTracker = _tracker.ReIDTracker
@@ -414,6 +367,7 @@ GateResult = _tracker.GateResult
 FacePersonMatch = _tracker.FacePersonMatch
 
 ReIDTracker._crossing_pair = _crossing_pair
+ReIDTracker._crossing_for_detection = _crossing_for_detection
 ReIDTracker._appearance_refresh_required = _appearance_refresh_required_v081
 ReIDTracker._extract_embeddings_batch = _selective_extract_embeddings_batch_v081
 ReIDTracker._passes_association_gates = _passes_association_gates_v081
