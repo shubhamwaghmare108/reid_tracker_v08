@@ -41,15 +41,17 @@ class SafeTrack(_BaseTrack):
     """Track that never lets an invalid ReID result overwrite valid state."""
     def __post_init__(self):
         super().__post_init__()
-        if not validate_embedding(self.body_embedding, EXPECTED_BODY_DIM)[0]:
+        # Remove the legacy 256-D zero sentinel inserted by BaseTrack. A real
+        # initial descriptor is allowed to establish its own dimension; the
+        # production FeatureExtractor separately validates OSNet's 512-D output.
+        if not validate_embedding(self.body_embedding)[0]:
             self.body_embedding = None
         self.last_body_embedding = None
         self.reid_validation_stats = Counter()
 
-    def _validated(self, embedding, current, expected_dim=None):
-        current_ok, current_value, _ = validate_embedding(current, expected_dim)
-        if current_ok:
-            expected_dim = len(current_value)
+    def _validated(self, embedding, current):
+        current_ok, current_value, _ = validate_embedding(current)
+        expected_dim = len(current_value) if current_ok else None
         valid, value, reason = validate_embedding(embedding, expected_dim)
         self.reid_validation_stats[reason] += 1
         if not valid:
@@ -59,7 +61,7 @@ class SafeTrack(_BaseTrack):
 
     def update(self, box, body, face, confidence, update_gallery=False,
                recovered=False, detection_confidence=1.0):
-        body = self._validated(body, self.body_embedding, EXPECTED_BODY_DIM)
+        body = self._validated(body, self.body_embedding)
         face = self._validated(face, self.face_embedding)
         return super().update(box, body, face, confidence,
                               update_gallery=update_gallery,
@@ -67,9 +69,8 @@ class SafeTrack(_BaseTrack):
                               detection_confidence=detection_confidence)
 
 
-# The old V08 implementation refreshed every detection every N frames. This
-# replacement schedules fresh appearance by track condition instead.
 def _needs_fresh_appearance(self, boxes):
+    """Schedule appearance work by track condition instead of scene cadence."""
     active = [t for t in self.tracks if t.state != _tracker.TrackState.DELETED]
     if not active:
         return bool(boxes)
@@ -125,7 +126,7 @@ def _selective_extract_embeddings_batch(self, image, boxes, masks):
             if len(extracted) != len(selected):
                 raise ValueError(f'ReID output count mismatch: expected {len(selected)}, got {len(extracted)}')
             for (index, _), body in zip(selected, extracted):
-                ok, value, reason = validate_embedding(body, EXPECTED_BODY_DIM)
+                ok, value, reason = validate_embedding(body)
                 if ok:
                     bodies[index] = value
                 else:
@@ -139,8 +140,6 @@ def _selective_extract_embeddings_batch(self, image, boxes, masks):
     return bodies
 
 
-# Activate the hardened class and selective scheduler for every normal tracker
-# construction path after app.core imports this module.
 _tracker.Track = SafeTrack
 Track = SafeTrack
 ReIDTracker = _tracker.ReIDTracker
