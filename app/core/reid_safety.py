@@ -1,4 +1,4 @@
-"""Centralized Re-ID embedding validation and track-state hardening for V08."""
+"""Centralized Re-ID validation and track-state hardening for V08."""
 from __future__ import annotations
 from collections import Counter
 import logging
@@ -6,6 +6,10 @@ import numpy as np
 from app.core import tracker as _tracker
 
 logger = logging.getLogger(__name__)
+
+# TorchReID OSNet x1_0 returns 512-D descriptors. Keep this explicit so a
+# legacy 256-D zero placeholder can never masquerade as a valid body feature.
+EXPECTED_BODY_DIM = 512
 
 
 def validate_embedding(embedding, expected_dim: int | None = None):
@@ -30,7 +34,9 @@ def validate_embedding(embedding, expected_dim: int | None = None):
         return False, None, "NAN_OR_INF"
     if norm <= 1e-8:
         return False, None, "ZERO_NORM"
-    return True, value.astype(np.float32, copy=False), "OK"
+    value = value.astype(np.float32, copy=False)
+    value = value / max(float(np.linalg.norm(value)), 1e-12)
+    return True, value, "OK"
 
 
 _BaseTrack = _tracker.Track
@@ -41,11 +47,17 @@ class SafeTrack(_BaseTrack):
 
     def __post_init__(self):
         super().__post_init__()
+        # The base V08 class historically inserted a 256-D zero vector for a
+        # missing first body descriptor. Remove that sentinel completely.
+        if not validate_embedding(self.body_embedding, EXPECTED_BODY_DIM)[0]:
+            self.body_embedding = None
+        self.last_body_embedding = None
         self.reid_validation_stats = Counter()
 
-    def _validated(self, embedding, current):
-        current_ok, current_value, _ = validate_embedding(current)
-        expected_dim = len(current_value) if current_ok else None
+    def _validated(self, embedding, current, expected_dim=None):
+        current_ok, current_value, _ = validate_embedding(current, expected_dim)
+        if current_ok:
+            expected_dim = len(current_value)
         valid, value, reason = validate_embedding(embedding, expected_dim)
         self.reid_validation_stats[reason] += 1
         if not valid:
@@ -55,7 +67,11 @@ class SafeTrack(_BaseTrack):
 
     def update(self, box, body, face, confidence, update_gallery=False,
                recovered=False, detection_confidence=1.0):
-        body = self._validated(body, self.body_embedding)
+        # Body must be OSNet x1_0-compatible. Invalid results are converted to
+        # None, so BaseTrack.update leaves the previous valid descriptor intact.
+        body = self._validated(body, self.body_embedding, EXPECTED_BODY_DIM)
+        # Face dimensions are discovered from the existing valid face embedding;
+        # this avoids hardcoding an InsightFace model-specific size.
         face = self._validated(face, self.face_embedding)
         return super().update(
             box, body, face, confidence,
