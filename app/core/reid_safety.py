@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter
 import logging
 import time
-import cv2
 import numpy as np
 from app.core import tracker as _tracker
 
@@ -68,36 +67,34 @@ class SafeTrack(_BaseTrack):
                               detection_confidence=detection_confidence)
 
 
-# Selective appearance refresh. The old V08 cadence refreshed every track in
-# the scene every N frames. That creates a CPU spike and makes one crossing
-# capable of triggering scene-wide ReID. Only detections belonging to new,
-# uncertain, occluded, stale, or overlapping tracks need fresh appearance.
+# The old V08 implementation refreshed every detection every N frames. This
+# replacement schedules fresh appearance by track condition instead.
 def _needs_fresh_appearance(self, boxes):
-    active = [t for t in self.tracks if t.state != self.TrackState.DELETED]
+    active = [t for t in self.tracks if t.state != _tracker.TrackState.DELETED]
     if not active:
         return bool(boxes)
     for box in boxes:
-        nearby = []
+        candidates = []
         for track in active:
             iou = self._compute_iou(track.predicted_bbox, box)
             distance = self._distance(track.predicted_bbox, box) / self._scale(track.last_reliable_bbox)
-            nearby.append((iou, distance, track))
-        best_iou, best_distance, best = max(nearby, key=lambda x: x[0] - 0.02 * x[1])
-        if best.state in (self.TrackState.TENTATIVE, self.TrackState.OCCLUDED, self.TrackState.LOST):
+            candidates.append((iou - 0.02 * distance, iou, distance, track))
+        _, best_iou, best_distance, best = max(candidates, key=lambda x: x[0])
+        if best.state in (_tracker.TrackState.TENTATIVE, _tracker.TrackState.OCCLUDED, _tracker.TrackState.LOST):
             return True
         if best.reid_age >= self.reid_interval or best.prediction_uncertainty >= .25:
             return True
         if best_iou < self.association_min_iou and best_distance > self.weak_motion_distance:
             return True
-        if any(self._compute_iou(box, other) >= .10 for other in boxes if other is not box):
+        if any(self._compute_iou(box, other) >= .10 for other in boxes if not np.array_equal(other, box)):
             return True
     return False
 
 
 def _selective_extract_embeddings_batch(self, image, boxes, masks):
-    """Extract appearance only for detections that actually need it."""
+    """Extract appearance only for new, uncertain, stale, or crossing tracks."""
     started = time.perf_counter()
-    active = [t for t in self.tracks if t.state != self.TrackState.DELETED]
+    active = [t for t in self.tracks if t.state != _tracker.TrackState.DELETED]
     selected = []
     for index, (box, mask) in enumerate(zip(boxes, masks)):
         needs = not active
@@ -108,11 +105,11 @@ def _selective_extract_embeddings_batch(self, image, boxes, masks):
                 distance = self._distance(track.predicted_bbox, box) / self._scale(track.last_reliable_bbox)
                 candidates.append((iou - .02 * distance, iou, distance, track))
             _, best_iou, best_distance, best = max(candidates, key=lambda x: x[0])
-            needs = (best.state in (self.TrackState.TENTATIVE, self.TrackState.OCCLUDED, self.TrackState.LOST)
+            needs = (best.state in (_tracker.TrackState.TENTATIVE, _tracker.TrackState.OCCLUDED, _tracker.TrackState.LOST)
                      or best.reid_age >= self.reid_interval
                      or best.prediction_uncertainty >= .25
                      or (best_iou < self.association_min_iou and best_distance > self.weak_motion_distance))
-            if any(self._compute_iou(box, other) >= .10 for other in boxes if other is not box):
+            if any(self._compute_iou(box, other) >= .10 for other in boxes if not np.array_equal(other, box)):
                 needs = True
         if needs:
             crop = self._prepare_reid_crop(image, box, mask)
@@ -142,18 +139,14 @@ def _selective_extract_embeddings_batch(self, image, boxes, masks):
     return bodies
 
 
+# Activate the hardened class and selective scheduler for every normal tracker
+# construction path after app.core imports this module.
 _tracker.Track = SafeTrack
-_tracker.TrackState = _tracker.TrackState
-_original_state = _tracker.TrackState
-# Expose the enum through the patched module exactly as before.
 Track = SafeTrack
 ReIDTracker = _tracker.ReIDTracker
 TrackState = _tracker.TrackState
 IdentityState = _tracker.IdentityState
 GateResult = _tracker.GateResult
 FacePersonMatch = _tracker.FacePersonMatch
-
-# Bind methods after class import so existing ReIDTracker instances use the
-# safer scheduling without changing its public constructor/API.
 ReIDTracker._appearance_refresh_required = _needs_fresh_appearance
 ReIDTracker._extract_embeddings_batch = _selective_extract_embeddings_batch
