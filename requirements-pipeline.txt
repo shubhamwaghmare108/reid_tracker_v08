@@ -1,0 +1,13 @@
+# Optional local/worker dependencies for run_pipeline.py and gallery enrollment.
+-r requirements.txt
+# Torch 2.0-2.2 and the compiled SciPy wheels used by this pipeline require
+# the NumPy 1.x ABI. Keep these upper bounds until the ML stack is upgraded as
+# a tested unit.
+numpy>=1.24.0,<2.0
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+torchreid>=0.2.0
+insightface>=0.7.0
+scipy>=1.10.0,<1.14.0

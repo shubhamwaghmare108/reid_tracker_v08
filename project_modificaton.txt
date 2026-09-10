@@ -1,0 +1,1138 @@
+# V07 Re-ID Tracker — Performance + ID-Switch Hardening
+
+You are modifying the existing GitHub repository:
+
+`https://github.com/shubhamwaghmare108/reid_tracker_v06.git`
+
+The current system uses:
+
+* YOLO11 Segmentation for person detection + masks
+* OSNet x1.0 for body Re-ID
+* Motion prediction
+* IoU
+* Re-ID appearance similarity
+* Hungarian assignment
+* Track lifecycle management
+* Occlusion/recovery logic
+* Identity hardening
+* Track/gallery management
+* Existing tracking metrics and event logging
+
+## IMPORTANT CONSTRAINTS
+
+Do NOT:
+
+* add RNN
+* add LSTM
+* add GRU
+* replace OSNet
+* replace YOLO-Seg
+* add SAM/SAM 2/SAM 3
+* replace the existing Track Manager with ByteTrack/BoT-SORT unless only used as a benchmark
+* remove existing identity-hardening logic
+* remove existing recovery logic
+* remove existing metrics/events
+* blindly change thresholds without measuring the effect
+
+The objective is to create a **V07 performance and association-hardening version** while preserving V06 functionality.
+
+---
+
+# PHASE 1 — GPU-ACCELERATED OSNet + BATCHED RE-ID
+
+## 1. Device handling
+
+Inspect the existing `app/config.py` and `app/core/reid.py`.
+
+Make OSNet device selection configurable:
+
+```text
+auto
+cpu
+cuda
+```
+
+Behavior:
+
+```text
+auto:
+    CUDA available → CUDA
+    otherwise → CPU
+
+cuda:
+    use CUDA if available
+    otherwise fail clearly or fall back according to existing project conventions
+
+cpu:
+    force CPU
+```
+
+Do not silently claim GPU acceleration when the model is actually running on CPU.
+
+At startup log:
+
+```text
+ReID device: CUDA / CPU
+ReID model: OSNet x1.0
+CUDA device: <name if available>
+```
+
+---
+
+## 2. Batch OSNet inference
+
+The current architecture may extract embeddings one person at a time.
+
+Refactor the ReID extractor so that it supports:
+
+```python
+extract_batch(crops)
+```
+
+instead of:
+
+```python
+extract(crop)
+extract(crop)
+extract(crop)
+...
+```
+
+The desired pipeline is:
+
+```text
+YOLO-Seg
+    ↓
+N detections
+    ↓
+N person crops
+    ↓
+batch tensor
+    ↓
+OSNet
+    ↓
+N embeddings
+```
+
+Expected shape:
+
+```text
+[N, 3, 256, 128]
+        ↓
+OSNet
+        ↓
+[N, embedding_dim]
+```
+
+Normalize each embedding after inference.
+
+Maintain backward compatibility with the existing single-image extraction API if other modules use it.
+
+---
+
+## 3. Avoid unnecessary OSNet inference
+
+Do not calculate a Re-ID embedding for detections that are clearly invalid.
+
+Before OSNet:
+
+* confidence gate
+* minimum bounding-box size
+* valid mask check
+* valid crop check
+* reasonable aspect-ratio check
+
+Do not extract embeddings from obviously unusable detections.
+
+Add optional configuration parameters such as:
+
+```text
+reid_min_detection_confidence
+reid_min_width
+reid_min_height
+reid_min_mask_area
+```
+
+Use conservative defaults based on existing V06 behavior.
+
+---
+
+# PHASE 2 — CROSSING DETECTION + DIRECTION-AWARE ASSOCIATION
+
+The major target is the ID-switch problem when two people cross each other.
+
+Example:
+
+```text
+Person A  → → → X ← ← ← Person B
+```
+
+At the crossing point, IoU becomes unreliable because both tracks can geometrically overlap.
+
+The tracker must explicitly detect this situation.
+
+---
+
+## 4. Track velocity
+
+For every confirmed track maintain:
+
+```text
+previous_center
+current_center
+velocity_x
+velocity_y
+speed
+direction_vector
+```
+
+Use the existing motion model if available.
+
+Do NOT introduce an RNN/LSTM.
+
+The existing motion model should remain the primary short-term predictor.
+
+---
+
+## 5. Direction consistency
+
+For each track and candidate detection calculate a direction-consistency score.
+
+Example:
+
+```text
+track direction:
+        →
+
+candidate displacement:
+        →
+
+high similarity
+
+
+track direction:
+        →
+
+candidate displacement:
+        ←
+
+low similarity
+```
+
+Use cosine similarity or an equivalent normalized directional metric.
+
+Handle low-speed tracks carefully:
+
+If speed is close to zero:
+
+```text
+direction confidence = low
+```
+
+and do not strongly penalize direction mismatch.
+
+---
+
+## 6. Predicted position
+
+Use the existing motion prediction to estimate:
+
+```text
+predicted_center
+```
+
+Then calculate distance between:
+
+```text
+predicted_center
+```
+
+and:
+
+```text
+candidate_detection_center
+```
+
+Normalize the distance using the track/detection scale rather than using only raw pixels.
+
+---
+
+## 7. Crossing detector
+
+Add a function similar to:
+
+```python
+is_crossing_ambiguous(track_a, track_b, detections)
+```
+
+or an equivalent clean design.
+
+Detect a crossing/ambiguity situation when:
+
+1. Two confirmed tracks are spatially close.
+2. Their predicted regions overlap or candidate assignments overlap.
+3. Both tracks have competing candidate detections.
+4. Their boxes/masks have significant overlap.
+5. Their trajectories indicate potentially conflicting assignment.
+
+Do not classify every overlap as a crossing.
+
+Avoid false positives for people walking side-by-side.
+
+The crossing detector should produce:
+
+```text
+normal
+ambiguous
+crossing
+```
+
+or an equivalent confidence value.
+
+---
+
+# PHASE 3 — ADAPTIVE ASSOCIATION WEIGHTS
+
+The existing V06 association combines:
+
+* appearance
+* motion
+* IoU
+* gating
+
+Preserve this architecture but make the weights situation-aware.
+
+## Normal condition
+
+Use the existing V06 weighting as the baseline.
+
+Do not unnecessarily change behavior for normal tracking.
+
+## Crossing condition
+
+When crossing/ambiguity is detected:
+
+```text
+increase importance of:
+    OSNet appearance
+    motion consistency
+    direction consistency
+
+decrease importance of:
+    IoU
+```
+
+Do not use arbitrary weights without configuration.
+
+Create configuration parameters such as:
+
+```text
+normal_appearance_weight
+normal_motion_weight
+normal_iou_weight
+
+crossing_appearance_weight
+crossing_motion_weight
+crossing_iou_weight
+crossing_direction_weight
+```
+
+Ensure the final score remains normalized.
+
+For example:
+
+```text
+association_score =
+    appearance_weight * appearance_score
+  + motion_weight     * motion_score
+  + iou_weight        * iou_score
+  + direction_weight  * direction_score
+```
+
+The exact default values should be chosen conservatively and documented.
+
+---
+
+# PHASE 4 — HARD ASSOCIATION GATING
+
+The scoring function alone must not be responsible for preventing ID switches.
+
+Before assignment, reject impossible matches.
+
+Potential gates:
+
+```text
+motion distance gate
+direction gate
+appearance similarity gate
+IoU gate
+scale/aspect gate
+```
+
+Use adaptive gating.
+
+For example:
+
+Normal:
+
+```text
+normal gates
+```
+
+Crossing:
+
+```text
+stricter appearance gate
+stricter direction/motion gate
+weaker reliance on IoU
+```
+
+Do NOT make the gates so strict that normal occlusion recovery becomes impossible.
+
+---
+
+# PHASE 5 — FREEZE RE-ID GALLERY DURING AMBIGUITY/OCCLUSION
+
+This is critical.
+
+The Re-ID gallery must not learn from unreliable observations.
+
+Current problem scenario:
+
+```text
+Track A gallery
+[A1, A2, A3, A4]
+
+person A crosses person B
+
+bad/mixed crop
+      ↓
+
+BAD embedding
+      ↓
+
+gallery contamination
+```
+
+Prevent this.
+
+---
+
+## 8. Define embedding reliability
+
+An embedding should be considered reliable only when appropriate conditions are met.
+
+Possible criteria:
+
+* high detection confidence
+* sufficient bbox size
+* sufficient mask area
+* good mask quality
+* stable track
+* successful association
+* no crossing ambiguity
+* no severe occlusion
+* sufficient OSNet similarity
+* stable motion
+* identity state allows gallery update
+
+Create a clear function such as:
+
+```python
+is_reliable_reid_observation(...)
+```
+
+---
+
+## 9. Freeze gallery updates
+
+During:
+
+```text
+crossing
+ambiguous association
+heavy occlusion
+uncertain identity
+low-quality detection
+low-quality mask
+```
+
+do:
+
+```text
+DO NOT update Re-ID gallery
+```
+
+Existing trusted gallery entries must remain unchanged.
+
+Example:
+
+```text
+NORMAL
+Track 17
+gallery update = allowed
+
+CROSSING
+Track 17
+gallery update = blocked
+
+OCCLUSION
+Track 17
+gallery update = blocked
+
+RECOVERY
+Track 17
+gallery update = allowed only after strong confirmation
+```
+
+Do not delete existing trusted embeddings simply because a temporary observation is bad.
+
+---
+
+# PHASE 6 — SOFT MASK EXPERIMENT
+
+The current pipeline uses YOLO-Seg masks before OSNet.
+
+Do not remove this.
+
+Instead implement a configurable mask mode:
+
+```text
+hard
+soft
+bbox
+```
+
+### Hard
+
+Existing behavior:
+
+```text
+person = 1.0
+background = 0.0
+```
+
+### Soft
+
+Experiment with:
+
+```text
+person = 1.0
+background = configurable small value
+```
+
+For example:
+
+```text
+mask_background_weight = 0.15
+```
+
+Conceptually:
+
+```python
+soft_mask = background_weight + (
+    1.0 - background_weight
+) * mask
+```
+
+Then:
+
+```python
+masked_crop = crop * soft_mask
+```
+
+### BBOX
+
+Original RGB crop without segmentation.
+
+This provides an experimental baseline.
+
+---
+
+## 10. Make mask mode configurable
+
+Add:
+
+```text
+reid_mask_mode:
+    hard
+    soft
+    bbox
+```
+
+Do not assume soft masking is automatically better.
+
+The purpose is to benchmark:
+
+```text
+YOLO bbox → OSNet
+YOLO hard mask → OSNet
+YOLO soft mask → OSNet
+```
+
+on the user's real tracking videos.
+
+---
+
+# PHASE 7 — IMPROVED TRACK STATE
+
+Extend the existing track state only where necessary.
+
+Useful fields:
+
+```text
+velocity_x
+velocity_y
+speed
+direction_vector
+direction_confidence
+crossing_state
+association_confidence
+reid_confidence
+gallery_update_allowed
+occlusion_state
+last_reliable_embedding_frame
+```
+
+Avoid duplicating information that already exists.
+
+Maintain backward compatibility with existing serialized/configured structures where applicable.
+
+---
+
+# PHASE 8 — TRACK ASSOCIATION LOGIC
+
+Implement the complete association sequence as:
+
+```text
+YOLO-Seg detections
+        ↓
+filter detections
+        ↓
+generate mask-aware crops
+        ↓
+batch OSNet inference
+        ↓
+predict track positions
+        ↓
+calculate candidate pairs
+        ↓
+calculate:
+    appearance similarity
+    motion similarity
+    IoU
+    direction similarity
+    scale compatibility
+        ↓
+detect crossing/ambiguity
+        ↓
+select normal/crossing weights
+        ↓
+apply hard gates
+        ↓
+Hungarian assignment
+        ↓
+validate assignment
+        ↓
+update tracks
+        ↓
+conditionally update galleries
+        ↓
+identity hardening
+        ↓
+occlusion/recovery
+```
+
+Do not bypass the existing Track Manager.
+
+---
+
+# PHASE 9 — PREVENT ID SWITCHES AFTER CROSSING
+
+After a crossing, don't immediately assume the assignment is correct simply because Hungarian matching produced a result.
+
+For an ambiguous crossing:
+
+1. Compare appearance.
+2. Compare predicted trajectory.
+3. Compare direction.
+4. Compare temporal consistency.
+5. Check whether the candidate was associated with the same track before crossing.
+6. Check whether the proposed assignment would require an implausible trajectory jump.
+7. Reject/reconsider the assignment if confidence is insufficient.
+
+If confidence is insufficient:
+
+```text
+temporary uncertainty
+```
+
+is preferable to:
+
+```text
+incorrect identity switch
+```
+
+Do not create a new ID unnecessarily if the original track can safely remain alive through short-term occlusion.
+
+---
+
+# PHASE 10 — DO NOT CONTAMINATE IDENTITY STATE
+
+Respect the existing V06 identity states.
+
+Do not immediately change:
+
+```text
+UNKNOWN
+CANDIDATE
+CONFIRMED
+RETAINED
+```
+
+based on one uncertain crossing observation.
+
+Preserve existing identity-hardening rules.
+
+During ambiguity:
+
+```text
+identity state should remain stable
+```
+
+unless strong evidence justifies a state transition.
+
+---
+
+# PHASE 11 — PERFORMANCE OPTIMIZATION
+
+Measure the processing pipeline by stage.
+
+Add timing metrics:
+
+```text
+YOLO inference time
+mask processing time
+crop preparation time
+OSNet batch inference time
+association time
+track manager time
+total frame time
+FPS
+```
+
+Report:
+
+```text
+average
+median
+P95
+```
+
+where practical.
+
+This is important because the previous V06 implementation experienced severe low-FPS behavior.
+
+Do not optimize blindly.
+
+---
+
+# PHASE 12 — MEMORY / GPU SAFETY
+
+Ensure that batched Re-ID inference:
+
+* uses `torch.no_grad()` or inference mode
+* does not retain computational graphs
+* properly moves tensors to the selected device
+* returns embeddings to CPU only when necessary
+* avoids unnecessary CPU↔GPU transfers
+* does not repeatedly initialize OSNet
+* initializes YOLO and OSNet only once
+
+Do not recreate the OSNet model per frame.
+
+---
+
+# PHASE 13 — CONFIGURATION
+
+Centralize all new parameters.
+
+Do not scatter magic numbers throughout `tracker.py`.
+
+Add clearly documented configuration groups:
+
+```text
+REID
+DEVICE
+ASSOCIATION
+CROSSING
+GALLERY
+MASK
+PERFORMANCE
+```
+
+Example:
+
+```yaml
+reid:
+  device: auto
+  batch_size: 16
+  mask_mode: soft
+  min_confidence: 0.4
+
+association:
+  appearance_weight: ...
+  motion_weight: ...
+  iou_weight: ...
+  direction_weight: ...
+
+crossing:
+  enabled: true
+  enabled_iou_threshold: ...
+  direction_threshold: ...
+  ambiguity_margin: ...
+
+gallery:
+  freeze_during_crossing: true
+  freeze_during_occlusion: true
+  update_only_reliable: true
+```
+
+Adapt this to the repository's existing configuration format rather than blindly introducing YAML if the project uses another format.
+
+---
+
+# PHASE 14 — TESTING
+
+Do not finish after changing the code.
+
+Run the existing test suite first.
+
+Then add tests for:
+
+### Test 1 — Batch Re-ID
+
+Verify:
+
+```text
+N crops → N embeddings
+```
+
+and that batch embeddings approximately match single-image embeddings.
+
+### Test 2 — Direction
+
+Verify:
+
+```text
+same direction → high score
+opposite direction → low score
+stationary → direction confidence low
+```
+
+### Test 3 — Crossing
+
+Create synthetic track/detection cases:
+
+```text
+A → → →
+B ← ← ←
+```
+
+Verify that crossing mode activates.
+
+### Test 4 — Gallery freeze
+
+Verify:
+
+```text
+normal observation → gallery update
+crossing observation → no update
+occluded observation → no update
+```
+
+### Test 5 — Soft mask
+
+Verify all modes:
+
+```text
+bbox
+hard
+soft
+```
+
+produce valid OSNet tensors.
+
+### Test 6 — Association
+
+Verify that an implausible candidate is rejected even when IoU is high.
+
+### Test 7 — Recovery
+
+Verify that the new crossing logic does not break existing lost-track recovery.
+
+### Test 8 — Identity hardening
+
+Verify existing V06 identity states still behave correctly.
+
+---
+
+# PHASE 15 — BENCHMARK V06 VS V07
+
+This is mandatory.
+
+Do NOT simply state that V07 is better.
+
+Run the same video(s) with:
+
+```text
+V06
+V07
+```
+
+using the same:
+
+* YOLO model
+* OSNet model
+* input video
+* resolution
+* confidence thresholds
+* evaluation conditions
+
+Compare:
+
+```text
+FPS
+total frames
+total detections
+unique tracker IDs
+confirmed identities
+track fragments
+ID switches
+false identity claims
+recovery attempts
+successful recoveries
+association failures
+average track length
+```
+
+If available, also calculate:
+
+```text
+IDF1
+ID precision
+ID recall
+MOTA
+HOTA
+```
+
+Do not invent metrics if ground truth is unavailable.
+
+Clearly distinguish:
+
+```text
+measured
+estimated
+unavailable
+```
+
+---
+
+# PHASE 16 — ABLATION STUDY
+
+Perform an ablation experiment where practical:
+
+```text
+A = V06 baseline
+
+B = V06 + GPU/batched OSNet
+
+C = B + direction-aware association
+
+D = C + crossing detection
+
+E = D + gallery freezing
+
+F = E + hard mask
+
+G = E + soft mask
+
+H = E + bbox crop
+```
+
+The purpose is to determine which modification actually improves the system.
+
+For every configuration record:
+
+```text
+FPS
+ID switches
+fragments
+false identity claims
+recovery success
+```
+
+Do not optimize only for FPS.
+
+The primary objective is:
+
+```text
+fewer identity switches
+without destroying real-time performance
+```
+
+---
+
+# PHASE 17 — LOGGING
+
+Add useful events such as:
+
+```text
+CROSSING_DETECTED
+ASSOCIATION_AMBIGUOUS
+GALLERY_UPDATE_BLOCKED
+GALLERY_UPDATE_ALLOWED
+DIRECTION_GATE_REJECT
+MOTION_GATE_REJECT
+APPEARANCE_GATE_REJECT
+RECOVERY_ATTEMPT
+RECOVERY_ACCEPTED
+RECOVERY_REJECTED
+```
+
+Do not generate excessive per-frame logs by default.
+
+Use debug logging where appropriate.
+
+---
+
+# PHASE 18 — CODE QUALITY
+
+Follow the existing project architecture.
+
+Before editing:
+
+1. Inspect the repository.
+2. Identify the exact current implementations.
+3. Understand current data structures.
+4. Identify existing tests.
+5. Avoid duplicating functionality.
+
+After editing:
+
+1. Run tests.
+2. Run lint/type checks if configured.
+3. Run a short tracking video.
+4. Verify output video.
+5. Verify CSV/JSON metrics.
+6. Verify no regressions in identity states.
+7. Verify FPS measurements.
+
+Do not remove working V06 functionality simply to make the code simpler.
+
+---
+
+# FINAL DELIVERABLE
+
+At the end, provide a concise engineering report containing:
+
+## 1. Files changed
+
+Example:
+
+```text
+app/config.py
+app/core/reid.py
+app/core/tracker.py
+...
+```
+
+## 2. Changes made
+
+Explain each modification.
+
+## 3. Performance
+
+```text
+V06 FPS:
+V07 FPS:
+
+OSNet V06:
+OSNet V07:
+
+YOLO time:
+OSNet time:
+Association time:
+```
+
+## 4. Tracking quality
+
+```text
+                 V06       V07
+ID switches      ...
+Fragments        ...
+False claims    ...
+Recovery         ...
+FPS              ...
+```
+
+## 5. Mask comparison
+
+```text
+BBOX:
+Hard mask:
+Soft mask:
+```
+
+## 6. Remaining bottlenecks
+
+Identify the actual measured bottleneck.
+
+Do not guess.
+
+## 7. Recommended configuration
+
+Provide the best configuration based on the benchmark.
+
+---
+
+# MOST IMPORTANT ENGINEERING PRINCIPLE
+
+Do not optimize the system based only on visual appearance of the output video.
+
+Use measurable evidence.
+
+The priority order is:
+
+```text
+1. Preserve identity correctness
+2. Reduce ID switches
+3. Improve occlusion recovery
+4. Prevent gallery contamination
+5. Improve FPS
+6. Reduce memory usage
+```
+
+The final system should remain:
+
+```text
+YOLO-Seg
+    +
+OSNet
+    +
+Motion
+    +
+Direction
+    +
+Adaptive Association
+    +
+Gallery Protection
+    +
+Track Manager
+    +
+Identity Hardening
+```
+
+No RNN/LSTM and no SAM 3.
+
+Before declaring the implementation complete, demonstrate that the modified code actually runs end-to-end and provide the V06 vs V07 benchmark results.

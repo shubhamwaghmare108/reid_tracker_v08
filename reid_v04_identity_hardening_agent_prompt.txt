@@ -1,0 +1,1059 @@
+
+IMPORTANT:
+Do NOT rewrite the tracker from scratch.
+
+The previous tracker-stability work is already implemented and tested.
+
+Current verified state:
+- Detection confidence/geometry filtering exists.
+- Detection duplicate suppression exists.
+- New-track gating exists.
+- Tentative duplicate arbitration exists.
+- Tentative tracks expire quickly.
+- OCCLUDED / RECOVERED / LOST lifecycle exists.
+- Adaptive Kalman logic exists.
+- Bounded trajectory/embedding galleries exist.
+- Attendance/presence debounce was added.
+- Diagnostic counters exist.
+- `.env.example` documents tracker settings.
+- 15 tracker tests pass.
+- Python compilation passes.
+
+The next task is NOT tracker redesign.
+
+The next task is:
+
+============================================================
+KNOWN-IDENTITY ASSIGNMENT HARDENING
+FACE-ANCHORED IDENTITY + CONSERVATIVE BODY RE-ID
+============================================================
+
+REAL VIDEO OBSERVATION
+------------------------------------------------------------
+
+The latest output video shows:
+
+1. Attendance stability has improved substantially.
+2. Re-ID recovery is being exercised.
+3. Track lifecycle is functioning.
+4. However, the known identity "shubham" is sometimes assigned to
+   different physical people.
+5. In particular, body-only evidence can cause a back-facing or
+   non-face-visible person to be assigned the known identity "shubham".
+6. This indicates that tracking is reasonably stable but identity
+   classification is too permissive.
+
+The main suspected flow is:
+
+current track
+    ↓
+body embedding
+    ↓
+body similarity to known gallery
+    ↓
+face unavailable
+    ↓
+body-only similarity is accepted
+    ↓
+known identity assigned
+
+This must be fixed.
+
+============================================================
+1. INSPECT THE CURRENT CODE FIRST
+============================================================
+
+Before modifying anything inspect the actual current implementation:
+
+- app/core/tracker.py
+- app/core/gallery.py
+- app/core/reid.py
+- app/core/face.py
+- app/core/presence.py
+- app/config.py
+- enrollment pipeline
+- gallery-building code
+- existing tests
+
+Specifically trace:
+
+A. How body embeddings are generated.
+B. How face embeddings are generated.
+C. How enrollment embeddings are stored.
+D. How gallery means/prototypes are created.
+E. How `_frame_level_identity_assignment()` works.
+F. How `_hybrid_similarity()` behaves when face is unavailable.
+G. When `Track.body_gallery` is updated.
+H. When `Track.face_gallery` is updated.
+I. Whether a track can change from UNKNOWN → known identity based
+   on body-only evidence.
+J. Whether two tracks can simultaneously claim the same known identity.
+K. Whether an identity can change too easily from one person to another.
+L. Whether wrong identity evidence can contaminate historical galleries.
+
+Do not assume the existing code matches an earlier version.
+
+Work from the actual current repository.
+
+============================================================
+2. SEPARATE TRACKING FROM IDENTITY RECOGNITION
+============================================================
+
+Maintain the existing use of body Re-ID for TRACK ASSOCIATION.
+
+Body Re-ID is useful for:
+
+    detection
+       ↓
+    same physical track?
+
+That does NOT mean body Re-ID should automatically answer:
+
+    who is this person?
+
+Separate:
+
+TRACK MATCHING
+IDENTITY RECOGNITION
+IDENTITY RECOVERY
+
+These are different decisions.
+
+Do not weaken the existing tracker association just to fix
+identity recognition.
+
+============================================================
+3. FACE SHOULD BE THE PRIMARY KNOWN-IDENTITY EVIDENCE
+============================================================
+
+For a known identity such as "shubham":
+
+If a reliable face embedding is available:
+
+    face recognition
+          ↓
+    strong face match
+          ↓
+    known identity
+
+Face evidence should have substantially greater authority than
+body-only evidence for declaring a known identity.
+
+Body Re-ID should support the decision.
+
+Do not allow a weak body similarity to override a strong conflicting
+face result.
+
+============================================================
+4. BODY-ONLY MATCH MUST BE CONSERVATIVE
+============================================================
+
+This is the most important requirement.
+
+When:
+
+    face = unavailable
+
+and:
+
+    body similarity to "shubham" = moderately/high
+
+DO NOT immediately assign:
+
+    identity = shubham
+
+Instead use:
+
+    identity_candidate = shubham
+
+and require additional evidence.
+
+Possible evidence:
+
+- repeated consistent body matches
+- same canonical track history
+- stable trajectory
+- previous confirmed identity
+- high-quality body embedding
+- multiple gallery samples/prototypes
+- temporal consistency
+- no competing known identity
+- no simultaneous canonical owner for that identity
+
+Use configurable thresholds.
+
+Do not simply lower or raise one global threshold.
+
+============================================================
+5. INTRODUCE IDENTITY STATES
+============================================================
+
+If the architecture does not already have an equivalent mechanism,
+introduce identity state separately from TrackState.
+
+For example:
+
+    UNKNOWN
+    CANDIDATE
+    CONFIRMED
+    RETAINED
+
+Meaning:
+
+UNKNOWN:
+    No reliable known identity.
+
+CANDIDATE:
+    Body/face evidence suggests a possible known identity but
+    evidence is not yet sufficient.
+
+CONFIRMED:
+    Identity has sufficient reliable evidence.
+
+RETAINED:
+    Identity was previously confirmed and is temporarily being
+    retained through occlusion/face disappearance.
+
+Do NOT confuse this with:
+
+TENTATIVE
+CONFIRMED
+OCCLUDED
+RECOVERED
+LOST
+
+Track state and identity state are separate concepts.
+
+============================================================
+6. IDENTITY HYSTERESIS
+============================================================
+
+Do not change identity from:
+
+    UNKNOWN → shubham
+
+because of one good body embedding.
+
+Require temporal consistency.
+
+Example:
+
+Frame 1:
+    body candidate = shubham
+
+Frame 2:
+    body candidate = shubham
+
+Frame 3:
+    body candidate = shubham
+
+Frame 4:
+    strong evidence
+
+Then:
+
+    identity = shubham
+
+Similarly, once a person is confirmed as shubham:
+
+    shubham
+       ↓
+    temporary weak body evidence
+       ↓
+    still shubham
+
+Do not immediately change identity because one frame is ambiguous.
+
+Use configurable parameters such as:
+
+- identity_candidate_min_frames
+- identity_confirm_threshold
+- identity_confirm_margin
+- identity_switch_threshold
+- identity_switch_min_frames
+- identity_retention_frames
+
+Use names consistent with the existing Settings architecture.
+
+============================================================
+7. KNOWN IDENTITY EXCLUSIVITY
+============================================================
+
+Enforce:
+
+    ONE KNOWN IDENTITY
+           ↓
+    ONE CANONICAL OWNER
+
+Example:
+
+Track 6:
+    strong face match
+    identity = shubham
+
+Track 9:
+    body similarity = shubham candidate
+
+Expected:
+
+Track 6 → shubham
+Track 9 → UNKNOWN/CANDIDATE
+
+NOT:
+
+Track 6 → shubham
+Track 9 → shubham
+
+unless Track 9 has overwhelmingly stronger independent evidence.
+
+If two tracks claim the same known identity:
+
+1. Compare face evidence.
+2. Compare identity confidence.
+3. Compare historical consistency.
+4. Compare number of stable observations.
+5. Compare body/face quality.
+6. Prefer the existing canonical owner when evidence is ambiguous.
+7. Keep the weaker track anonymous rather than forcing identity.
+
+Do not merge physical tracks solely because they claim the same name.
+
+============================================================
+8. CANONICAL IDENTITY OWNER
+============================================================
+
+Maintain a canonical mapping conceptually like:
+
+    shubham → canonical_track_id
+
+If the implementation already has an equivalent mechanism,
+reuse it rather than creating unnecessary duplication.
+
+The important invariant is:
+
+    one physical known identity
+        ↓
+    one canonical identity owner
+
+A track ID may change during recovery, but the canonical person
+identity must remain stable.
+
+============================================================
+9. RECOVERY MUST PRESERVE CONFIRMED IDENTITY
+============================================================
+
+Example:
+
+Frame 100:
+
+    Track 6
+    face match
+    shubham CONFIRMED
+
+Frames 101–130:
+
+    face unavailable
+    person becomes OCCLUDED
+
+Frame 131:
+
+    Track 6 or Track 9 recovered
+    body similarity supports previous track
+
+Expected:
+
+    shubham
+    same canonical identity
+
+NOT:
+
+    OUT
+    IN
+    unknown
+    new shubham
+
+Do not require a new face recognition event if a previously
+confirmed identity has strong temporal/body continuity.
+
+However, do not let a completely unrelated track inherit the
+identity merely because its body embedding is moderately similar.
+
+============================================================
+10. IDENTITY RECOVERY SHOULD USE TRACK HISTORY
+============================================================
+
+For a previously confirmed identity, compare the current embedding
+against:
+
+- known identity gallery
+- historical track body gallery
+- historical track face gallery when available
+- recent stable embeddings
+- trajectory/temporal context
+
+Prefer consistency with the person's own recent track history.
+
+Conceptually:
+
+current embedding
+      ↓
+historical track gallery
+      +
+known identity gallery
+      +
+motion/temporal consistency
+      ↓
+identity recovery decision
+
+Do not rely exclusively on one current-frame embedding.
+
+============================================================
+11. DO NOT LET LOW-CONFIDENCE MATCHES CONTAMINATE GALLERIES
+============================================================
+
+Inspect every gallery update.
+
+Separate:
+
+TRACKING CONFIDENCE
+
+from:
+
+IDENTITY CONFIDENCE
+
+A track can have:
+
+    excellent tracking confidence
+    but incorrect identity
+
+Therefore:
+
+    tracking_score >= threshold
+
+must NOT automatically mean:
+
+    safe identity-gallery update
+
+Only update a known identity's gallery using sufficiently reliable
+identity evidence.
+
+Do NOT update a known identity gallery from:
+
+- UNKNOWN tracks
+- ambiguous candidates
+- tentative tracks
+- weak body-only identity matches
+- OCCLUDED predictions
+- LOST tracks
+- identity-conflict tracks
+- newly recovered tracks with weak evidence
+- low-quality face detections
+- low-quality body crops
+
+Use strict identity-quality gates.
+
+============================================================
+12. PROTECT THE GLOBAL GALLERY
+============================================================
+
+The enrolled gallery represents the known identity.
+
+Do not allow runtime tracking to freely redefine it.
+
+Preferred model:
+
+ENROLLMENT GALLERY
+    ↓
+stable reference
+
+RUNTIME TRACK GALLERY
+    ↓
+temporary/adaptive history
+
+Do not continuously overwrite the enrollment identity prototype.
+
+If adaptive gallery updates are already supported, keep them
+conservative and bounded.
+
+============================================================
+13. USE MULTIPLE BODY PROTOTYPES WHEN POSSIBLE
+============================================================
+
+Inspect the current gallery implementation.
+
+If it currently reduces all body embeddings for one identity to a
+single mean vector, improve the matching representation without
+breaking existing APIs.
+
+Prefer retaining multiple representative prototypes or a bounded
+set of embeddings when practical:
+
+    shubham
+      ├── body prototype 1
+      ├── body prototype 2
+      ├── body prototype 3
+      └── ...
+
+Then compare the current embedding against the best/top-k relevant
+prototype rather than relying exclusively on one mean.
+
+However:
+
+DO NOT unnecessarily redesign the entire gallery system.
+
+Preserve compatibility with existing enrollment data.
+
+If a schema/data migration would be required, support the existing
+format and clearly document the change.
+
+============================================================
+14. FACE QUALITY GATING
+============================================================
+
+Do not treat every detected face equally.
+
+Before using face evidence, consider:
+
+- face confidence
+- face bounding-box size
+- blur/quality if already available
+- frontal/profile quality if available
+- embedding validity
+- similarity margin
+
+A tiny/blurred/partial face should not override reliable historical
+identity evidence.
+
+Likewise, a strong face match should dominate a weak body conflict.
+
+============================================================
+15. BODY CROP QUALITY
+============================================================
+
+Inspect the body crops produced by the current pipeline.
+
+The current enrolled/runtime crops are approximately:
+
+    128 × 256
+
+with segmentation masking.
+
+Verify:
+
+- crop is valid
+- person occupies sufficient area
+- excessive black/background pixels are not dominating
+- mask is not producing pathological thin silhouettes
+- aspect ratio is consistent
+- resizing is consistent between enrollment and runtime
+
+Do not change preprocessing unless the inspection demonstrates an
+actual problem.
+
+If a body-quality score can be calculated cheaply, use it to
+weight body identity evidence.
+
+============================================================
+16. IDENTITY DECISION LOGIC
+============================================================
+
+Implement a decision system conceptually like:
+
+                    CURRENT TRACK
+                         │
+                         ▼
+                  identity manager
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+        face available         no face
+              │                     │
+              ▼                     ▼
+       face recognition        body candidate
+              │                     │
+       ┌──────┴──────┐        temporal evidence
+       │             │              │
+     strong        weak             ▼
+       │             │        candidate/unknown
+       ▼             ▼
+   confirm       use history
+       │
+       └──────────────┬─────────────┘
+                      ▼
+             canonical identity
+```
+
+Never make:
+
+    body_similarity >= 0.55
+
+(or any single arbitrary threshold)
+
+equivalent to:
+
+    known identity confirmed
+
+without considering modality, history, margin, and identity
+ownership.
+
+============================================================
+17. IDENTITY MARGIN
+============================================================
+
+Do not accept the best gallery identity solely because it is the
+highest score.
+
+Require:
+
+    best_score >= minimum_threshold
+
+AND, where applicable:
+
+    best_score - second_best_score >= margin
+
+This prevents ambiguous body embeddings from being assigned to a
+known identity.
+
+If the identity is ambiguous:
+
+    UNKNOWN
+
+is preferable to:
+
+    WRONG KNOWN IDENTITY
+
+============================================================
+18. OPEN-SET BEHAVIOR
+============================================================
+
+The system must support:
+
+    "I don't know this person."
+
+This is essential.
+
+Unknown people should remain:
+
+    UNKNOWN
+
+when evidence is insufficient.
+
+Do NOT force every detection into one of the enrolled identities.
+
+The desired behavior is:
+
+    known → known
+    unknown → unknown
+    ambiguous → unknown/candidate
+
+not:
+
+    ambiguous → nearest known person
+
+============================================================
+19. IDENTITY SWITCH PROTECTION
+============================================================
+
+Once:
+
+    Track 6 = shubham
+
+has been strongly confirmed, do not switch:
+
+    Track 6 = another identity
+
+because of one ambiguous frame.
+
+Require strong contradictory evidence over multiple observations.
+
+Likewise, don't allow:
+
+    Track 9 = shubham
+
+to steal the identity from Track 6 because of one body match.
+
+Identity changes should be rare and evidence-driven.
+
+============================================================
+20. ADD DEBUG DIAGNOSTICS
+============================================================
+
+Add optional debug information:
+
+    identity_state
+    identity_candidate
+    identity_score
+    identity_margin
+    face_score
+    body_score
+    identity_source
+    canonical_identity_owner
+    identity_switch_count
+    identity_rejection_reason
+
+For example:
+
+    ID 6
+    Track: CONFIRMED
+    Identity: shubham
+    Identity state: CONFIRMED
+    Source: FACE
+    Face: 0.91
+    Body: 0.72
+
+or:
+
+    ID 9
+    Track: CONFIRMED
+    Identity: UNKNOWN
+    Candidate: shubham
+    Source: BODY
+    Body: 0.74
+    Reason: NO_FACE / BELOW_IDENTITY_CONFIRMATION
+
+This diagnostic information should be available in debug mode.
+
+============================================================
+21. ADD CONFIGURATION
+============================================================
+
+All newly introduced thresholds/settings must be configurable
+through the existing Settings system and `.env`.
+
+Do not hardcode important thresholds.
+
+Document them in:
+
+    .env.example
+
+Use descriptive names.
+
+Avoid changing existing defaults unnecessarily.
+
+============================================================
+22. TESTS
+============================================================
+
+Add focused tests for identity correctness.
+
+TEST 1:
+Strong face match + strong body match
+→ known identity confirmed.
+
+TEST 2:
+No face + moderate body similarity
+→ UNKNOWN/CANDIDATE, not confirmed known identity.
+
+TEST 3:
+No face + extremely strong repeated body evidence
+→ may become known only if configured body-only policy permits it
+   and temporal evidence is sufficient.
+
+TEST 4:
+Known shubham confirmed by face.
+Face disappears.
+Body remains consistent.
+→ retain shubham.
+
+TEST 5:
+Known shubham confirmed.
+Another track has similar body appearance.
+→ second track does not steal shubham.
+
+TEST 6:
+Two tracks simultaneously claim shubham.
+→ exactly one canonical owner.
+
+TEST 7:
+Unknown person has body similarity to shubham.
+→ remains unknown if evidence is insufficient.
+
+TEST 8:
+Identity candidate fluctuates:
+shubham → unknown → shubham
+→ no rapid identity switching.
+
+TEST 9:
+Wrong identity evidence for one frame
+→ existing confirmed identity remains stable.
+
+TEST 10:
+Face strongly contradicts body.
+→ face takes priority.
+
+TEST 11:
+Low-quality face should not cause an unsafe identity switch.
+
+TEST 12:
+Ambiguous top-1 vs second-best identity
+→ reject identity when margin requirement fails.
+
+TEST 13:
+Track becomes OCCLUDED
+→ confirmed identity retained.
+
+TEST 14:
+Track RECOVERED
+→ same canonical identity restored.
+
+TEST 15:
+Track deleted
+→ identity does not remain attached to a new unrelated track.
+
+TEST 16:
+Runtime embedding update from ambiguous identity
+→ must NOT contaminate known identity gallery.
+
+TEST 17:
+Strong confirmed identity observation
+→ allowed gallery update if existing design permits it.
+
+TEST 18:
+Two physically different people with similar clothing
+→ must remain separate identities.
+
+============================================================
+23. REGRESSION TEST THE PREVIOUS TRACKER TESTS
+============================================================
+
+Run all existing tests.
+
+Do not break:
+
+- detection deduplication
+- new-track gating
+- duplicate arbitration
+- occlusion state machine
+- recovery
+- attendance
+- diagnostics
+
+Expected:
+
+    all existing 15 tracker tests continue to pass
+
+plus:
+
+    new identity tests pass
+
+============================================================
+24. REAL VIDEO VALIDATION
+============================================================
+
+Use the latest available raw/unannotated source video if available.
+
+Do NOT use an already annotated output video as the only source for
+quantitative comparison.
+
+Evaluate specifically:
+
+A. Does the seated/back-facing person get incorrectly labeled
+   "shubham"?
+
+B. Does the foreground known person retain "shubham"?
+
+C. Can two physical people simultaneously receive "shubham"?
+
+D. Does identity remain stable through face disappearance?
+
+E. Does recovery preserve the canonical identity?
+
+F. Does attendance remain stable?
+
+Record:
+
+- number of identity assignments
+- number of UNKNOWN tracks
+- number of known-identity assignments
+- false known-identity assignments
+- identity switches
+- canonical identity conflicts
+- gallery updates
+- rejected identity candidates
+- recovery identity successes
+- attendance IN
+- attendance OUT
+
+============================================================
+25. IMPORTANT ACCEPTANCE CRITERIA
+============================================================
+
+The following is mandatory:
+
+ONE PHYSICAL PERSON
+        ↓
+ONE CANONICAL IDENTITY
+        ↓
+ONE PRESENCE RECORD
+
+And:
+
+UNKNOWN PERSON
+        ↓
+UNKNOWN
+
+must be allowed.
+
+The system must NEVER force an ambiguous person into "shubham"
+just because shubham is the closest body embedding.
+
+The most important real-video criterion is:
+
+If a person is facing away and there is no reliable face evidence,
+moderate body similarity alone must NOT immediately label that
+person as "shubham".
+
+============================================================
+26. DO NOT OVERFIT TO THIS SINGLE PERSON
+============================================================
+
+Do not hardcode:
+
+    name == "shubham"
+
+or special-case this identity.
+
+The implementation must work generically for:
+
+    person A
+    person B
+    person C
+    ...
+
+Use generic identity-management logic.
+
+============================================================
+27. PRESERVE ALL EXISTING APIs/UI
+============================================================
+
+Do not break:
+
+- Streamlit UI
+- pipeline API
+- detector API
+- tracker API
+- gallery API
+- enrollment workflow
+- presence API
+- existing configuration
+- existing database behavior
+
+If an internal refactor is necessary, maintain backwards compatibility.
+
+============================================================
+28. PERFORMANCE
+============================================================
+
+Keep real-time performance reasonable.
+
+Do not run expensive comparisons unnecessarily.
+
+Use:
+
+geometry gating
+    ↓
+track history
+    ↓
+candidate identity filtering
+    ↓
+Re-ID/face comparison
+
+where appropriate.
+
+Keep all histories bounded.
+
+============================================================
+29. FINAL VERIFICATION
+============================================================
+
+Run:
+
+pytest -q
+
+Python compilation.
+
+Verify imports.
+
+Verify Settings.
+
+Verify `.env` overrides.
+
+Verify Streamlit/pipeline import if possible.
+
+Then run the real video.
+
+Do not claim production-ready based solely on unit tests.
+
+============================================================
+30. UPDATE project_modificaton.txt
+============================================================
+
+Document:
+
+IMPLEMENTED
+VERIFIED
+REMAINING LIMITATIONS
+
+Include:
+
+- identity state machine
+- face-anchored recognition
+- conservative body-only recognition
+- identity hysteresis
+- identity exclusivity
+- canonical identity ownership
+- open-set UNKNOWN behavior
+- identity margin
+- gallery safety
+- tests
+- real-video validation
+
+Only mark real-video validation complete if the raw source video
+was actually evaluated.
+
+============================================================
+FINAL REPORT FORMAT
+============================================================
+
+Return a concise engineering report:
+
+1. Root cause found
+2. Files modified
+3. Identity architecture changes
+4. Face/body decision hierarchy
+5. Body-only policy
+6. Identity hysteresis
+7. Canonical identity ownership
+8. Gallery safety changes
+9. Configuration changes
+10. Tests added
+11. Existing tests result
+12. Compilation result
+13. Real-video result
+14. False identity assignments before/after
+15. Identity switches before/after
+16. Attendance before/after
+17. Remaining limitations
+
+MOST IMPORTANT:
+
+Do not optimize for "maximum recognition rate".
+
+Optimize for:
+
+    LOW FALSE IDENTITY ASSIGNMENT
+
+It is better to output:
+
+    UNKNOWN
+
+than incorrectly output:
+
+    shubham
+
+for the wrong person.
+
+Do not modify Re-ID model architecture/training unless the code
+inspection proves the current implementation itself is defective.
+The first goal is to make the identity decision layer correctly
+interpret the embeddings it already receives.

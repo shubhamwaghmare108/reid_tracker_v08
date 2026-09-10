@@ -1,0 +1,840 @@
+# V06 Tracking Upgrade — Direction-Aware Association & Occlusion Hardening
+
+You are modifying the existing `reid_tracker_v06` repository.
+
+## Primary objective
+
+Improve the current multi-object tracking system to reduce:
+
+* ID switches during person crossing
+* ID switches after short occlusions
+* Track fragmentation
+* False identity claims
+* Incorrect identity recovery
+* Identity swapping between two nearby/crossing people
+
+**Do NOT introduce RNN, GRU, LSTM, Transformer, or any other neural temporal model.**
+
+The existing Kalman filter, Re-ID system, Track Manager, identity-hardening logic, and metrics architecture must be preserved and improved rather than replaced.
+
+---
+
+# 1. First inspect the existing code
+
+Before making changes, inspect:
+
+```text
+app/core/tracker.py
+app/core/pipeline.py
+app/core/metrics.py
+```
+
+Also inspect:
+
+```text
+tests/
+configuration files
+run_pipeline.py
+```
+
+Understand the existing:
+
+* `KalmanFilter`
+* `Track`
+* `ReIDTracker`
+* association logic
+* `_passes_association_gates()`
+* identity locking
+* occlusion handling
+* recovery handling
+* trajectory history
+* velocity history
+* direction history
+* body/face Re-ID galleries
+* metrics/event logging
+
+Do not rewrite the architecture unnecessarily.
+
+---
+
+# 2. Preserve the current architecture
+
+The target architecture should remain:
+
+```text
+YOLO
+ ↓
+Detections
+ ↓
+Kalman prediction
+ ↓
+Candidate association
+ ↓
+IoU + motion + appearance + direction
+ ↓
+Track Manager
+ ↓
+Occlusion / recovery handling
+ ↓
+Identity hardening
+ ↓
+Final track IDs
+```
+
+The Kalman filter remains the primary motion predictor.
+
+Do NOT replace Kalman with another predictor.
+
+---
+
+# 3. Add direction-aware association
+
+The existing Track object already maintains velocity/direction information.
+
+Use this information explicitly during association.
+
+For every track calculate a stable recent motion direction.
+
+For example:
+
+```text
+vx > 0 → moving right
+vx < 0 → moving left
+vy > 0 → moving down
+vy < 0 → moving up
+```
+
+Do not rely on a single-frame velocity.
+
+Use a short history of recent velocity vectors.
+
+The direction estimate should be robust against small detection jitter.
+
+---
+
+# 4. Add direction consistency score
+
+For each:
+
+```text
+track ↔ detection
+```
+
+calculate a direction-consistency score.
+
+Conceptually:
+
+```text
+track_velocity = previous/recent velocity
+observed_motion = detection_center - previous_center
+```
+
+Use cosine similarity or an equivalent normalized directional comparison.
+
+Example:
+
+```text
+Track 7:
+velocity → → →
+
+Detection movement:
+→ → →
+
+direction_score = high
+```
+
+Opposite movement:
+
+```text
+Track 7:
+velocity → → →
+
+Detection movement:
+← ← ←
+
+direction_score = low
+```
+
+Handle near-zero velocity carefully.
+
+If the object is stationary or velocity is too small, direction should be considered unreliable rather than automatically penalized.
+
+---
+
+# 5. Add direction to association scoring
+
+The current association should continue using:
+
+* IoU
+* motion distance
+* scale consistency
+* body Re-ID
+* face Re-ID
+* existing association gates
+
+Add direction consistency as another signal.
+
+Prefer:
+
+```text
+association_score =
+    existing_score
+    + direction_component
+```
+
+Do not allow direction to completely override strong Re-ID evidence.
+
+Direction should support identity preservation, not become an absolute rule.
+
+---
+
+# 6. Add direction gating for ambiguous cases
+
+When two or more tracks compete for the same detection, use direction consistency to break ties.
+
+Example:
+
+```text
+Track 7  → moving right
+Track 12 → moving left
+
+Detection A → right-consistent
+Detection B → left-consistent
+```
+
+Prefer:
+
+```text
+Track 7  → Detection A
+Track 12 → Detection B
+```
+
+Do this especially when:
+
+* IoU scores are similar
+* motion distances are similar
+* appearance scores are close
+* people are crossing
+* bounding boxes overlap heavily
+
+Do NOT apply aggressive direction rejection when Re-ID evidence is strong and unambiguous.
+
+---
+
+# 7. Detect crossing events
+
+Add explicit crossing detection.
+
+A crossing event should be considered when:
+
+* two confirmed tracks become spatially close
+* their bounding boxes overlap or nearly overlap
+* their predicted positions approach each other
+* their velocity vectors indicate opposing/approaching motion
+
+Conceptually:
+
+```text
+Track 7  →     ← Track 12
+
+        approaching
+
+             ↓
+
+           overlap
+
+             ↓
+
+          crossing
+```
+
+Record the relationship between the tracks.
+
+Use the existing `occluded_by` mechanism where appropriate.
+
+Do not create duplicate tracks simply because two people temporarily overlap.
+
+---
+
+# 8. Protect identities during crossing
+
+When two confirmed identities enter a crossing/occlusion event:
+
+```text
+Track 7
+Track 12
+```
+
+their identity ownership must remain stable.
+
+Do not immediately transfer:
+
+```text
+identity 7 → Track 12
+identity 12 → Track 7
+```
+
+because of a single ambiguous frame.
+
+During crossing:
+
+* preserve the previous identity
+* preserve the track ID
+* continue Kalman prediction
+* preserve trajectory history
+* preserve velocity history
+* preserve Re-ID gallery
+* preserve identity lock state
+
+Only change identity when there is sufficiently strong evidence.
+
+---
+
+# 9. Add association margin protection
+
+For ambiguous association, calculate the difference between the best and second-best candidate.
+
+Example:
+
+```text
+Track 7:
+
+Detection A = 0.72
+Detection B = 0.70
+
+margin = 0.02
+```
+
+This is ambiguous.
+
+Do NOT immediately make a permanent identity change.
+
+Instead:
+
+```text
+CANDIDATE
+ ↓
+observe additional frames
+ ↓
+stronger evidence
+ ↓
+CONFIRMED
+```
+
+If the margin is high:
+
+```text
+Detection A = 0.91
+Detection B = 0.42
+```
+
+association is much safer.
+
+Use the existing identity-hardening states:
+
+```text
+UNKNOWN
+CANDIDATE
+CONFIRMED
+RETAINED
+```
+
+rather than creating a second competing identity-state system.
+
+---
+
+# 10. Improve occlusion handling
+
+The repository already has:
+
+```text
+CONFIRMED
+OCCLUDED
+RECOVERED
+LOST
+DELETED
+```
+
+Do not replace this state machine.
+
+Improve it.
+
+When a confirmed track temporarily loses its detection:
+
+```text
+CONFIRMED
+   ↓
+OCCLUDED
+```
+
+During occlusion:
+
+* continue Kalman prediction
+* increment occlusion counters
+* preserve identity
+* preserve appearance gallery
+* preserve trajectory
+* preserve direction/velocity history
+
+Do NOT immediately create a new identity.
+
+---
+
+# 11. Crossing-specific occlusion
+
+When two tracks overlap:
+
+```text
+Track 7 ↔ Track 12
+```
+
+treat this as a special occlusion/crossing situation.
+
+Maintain:
+
+```text
+track.crossing_partner
+track.crossing_start_frame
+track.crossing_frames
+```
+
+or an equivalent structure consistent with the existing design.
+
+When the people separate, attempt recovery using:
+
+1. Kalman predicted position
+2. motion consistency
+3. direction consistency
+4. IoU
+5. body Re-ID
+6. face Re-ID when available
+7. historical trajectory
+
+The goal is:
+
+```text
+Before crossing:
+
+Person A → ID 7
+Person B → ID 12
+
+After crossing:
+
+Person A → ID 7
+Person B → ID 12
+```
+
+---
+
+# 12. Do not overtrust Re-ID
+
+Re-ID should remain one component of association.
+
+Do not implement:
+
+```text
+highest Re-ID similarity = automatic identity
+```
+
+Instead combine:
+
+```text
+motion
++
+IoU
++
+direction
++
+appearance
++
+temporal consistency
+```
+
+Strong face evidence may remain a special high-confidence case according to the existing identity-hardening design.
+
+Body-only evidence should continue to respect the existing candidate/confirmation logic.
+
+---
+
+# 13. Preserve identity ownership
+
+The existing identity ownership/locking mechanism must remain.
+
+A confirmed identity should not simultaneously belong to multiple active tracks.
+
+Example:
+
+```text
+Identity A → Track 7
+```
+
+must not become:
+
+```text
+Identity A → Track 7
+Identity A → Track 12
+```
+
+unless the existing system explicitly supports a safe transition.
+
+During crossing, prefer retaining the original owner.
+
+---
+
+# 14. Improve recovery logic
+
+When a detection reappears after occlusion, recovery should consider:
+
+```text
+predicted position
+distance from prediction
+direction consistency
+trajectory consistency
+body appearance
+face appearance
+gallery similarity
+```
+
+Recovery should be more permissive than normal association where appropriate, but should still prevent obvious identity swaps.
+
+Do not simply increase every threshold.
+
+Use the existing distinction between normal association and recovery.
+
+---
+
+# 15. Add metrics for debugging ID switches
+
+Modify:
+
+```text
+app/core/metrics.py
+```
+
+to log, where appropriate:
+
+```text
+direction_score
+velocity_consistency
+association_margin
+crossing_event
+crossing_partner
+occlusion_partner
+crossing_frames
+recovery_score
+previous_track_id
+current_track_id
+```
+
+The metrics must make it possible to answer:
+
+> Why did Track 7 associate with this detection?
+
+and:
+
+> Why did Track 7/12 switch during crossing?
+
+---
+
+# 16. Add explicit ID-switch diagnostics
+
+When a potential ID switch occurs, record an event containing:
+
+```text
+frame
+track_id
+previous_identity
+candidate_identity
+previous_bbox
+new_bbox
+IoU
+motion_score
+direction_score
+body_reid_score
+face_reid_score
+association_score
+association_margin
+track_state
+identity_state
+occlusion_state
+crossing_state
+```
+
+Do not change the identity merely because a diagnostic event was generated.
+
+Diagnostics and decision logic should remain separate.
+
+---
+
+# 17. Keep performance in mind
+
+The previous system experienced severe FPS limitations.
+
+Therefore:
+
+* Do not add expensive neural networks.
+* Do not add RNN/GRU/LSTM.
+* Do not perform unnecessary Re-ID extraction.
+* Do not compare every detection against every historical embedding if the existing gating can reduce candidates.
+* Reuse existing embeddings and histories.
+* Keep direction calculations lightweight.
+* Prefer vectorized/simple numerical operations.
+
+The new direction/crossing logic should have minimal computational overhead compared with YOLO/Re-ID inference.
+
+---
+
+# 18. Testing requirements
+
+Add or update tests for at least these scenarios.
+
+### Test 1 — Normal movement
+
+```text
+A → → →
+```
+
+Expected:
+
+```text
+ID remains unchanged
+```
+
+### Test 2 — Opposite-direction crossing
+
+```text
+A → → → X ← ← ← B
+```
+
+Expected:
+
+```text
+A keeps original ID
+B keeps original ID
+```
+
+### Test 3 — Short occlusion
+
+```text
+A
+↓
+occluded
+↓
+A returns
+```
+
+Expected:
+
+```text
+same ID
+```
+
+### Test 4 — Crossing + short occlusion
+
+```text
+A → X ← B
+      ↓
+   occlusion
+      ↓
+A / B separate
+```
+
+Expected:
+
+```text
+no ID swap
+```
+
+### Test 5 — Similar appearance
+
+Two people with similar clothing should not automatically exchange identities.
+
+### Test 6 — Stationary objects
+
+Direction scoring must not incorrectly penalize stationary objects.
+
+### Test 7 — Sudden direction change
+
+A real object turning should not automatically cause a new identity.
+
+### Test 8 — Strong Re-ID evidence
+
+Strong, consistent Re-ID evidence should still be able to recover an identity when motion is temporarily unreliable.
+
+---
+
+# 19. Do not modify these concepts unnecessarily
+
+Preserve:
+
+```text
+YOLO detector
+Kalman filter
+Re-ID extractor
+Face recognition
+Body gallery
+Face gallery
+identity ownership
+identity locking
+UNKNOWN/CANDIDATE/CONFIRMED/RETAINED
+track states
+existing recovery system
+existing metrics architecture
+```
+
+Improve them rather than replacing them.
+
+---
+
+# 20. No RNN requirement
+
+Explicit prohibition:
+
+```text
+DO NOT IMPLEMENT:
+
+RNN
+SimpleRNN
+LSTM
+GRU
+Transformer
+Temporal CNN
+neural motion predictor
+learned trajectory predictor
+```
+
+The temporal model for this version must remain:
+
+```text
+Kalman
++
+trajectory history
++
+velocity history
++
+direction history
++
+Re-ID history
+```
+
+---
+
+# 21. Expected final architecture
+
+The final system should look like:
+
+```text
+                    YOLO
+                      ↓
+                 Detections
+                      ↓
+              Kalman Prediction
+                      ↓
+          ┌───────────┼───────────┐
+          ↓           ↓           ↓
+         IoU        Motion       Re-ID
+          ↓           ↓           ↓
+          └───────────┼───────────┘
+                      ↓
+              Direction Score
+                      ↓
+             Association Margin
+                      ↓
+            Crossing Detection
+                      ↓
+             Occlusion Manager
+                      ↓
+             Identity Hardening
+                      ↓
+                Final Track ID
+```
+
+---
+
+# 22. Deliverables
+
+After implementation, provide:
+
+### A. Modified files
+
+List every modified file.
+
+### B. Explanation
+
+Explain exactly:
+
+* what changed
+* why it changed
+* how crossing is detected
+* how direction is calculated
+* how association is changed
+* how occlusion is handled
+* how identity ownership is protected
+
+### C. Tests
+
+Report:
+
+```text
+tests passed
+tests failed
+```
+
+and explain any failures.
+
+### D. Performance
+
+Compare before/after:
+
+```text
+FPS
+processing time
+YOLO inference time
+Re-ID time
+tracking overhead
+```
+
+The new logic should not introduce a significant tracking-performance regression.
+
+### E. ID-switch analysis
+
+Explain how the implementation specifically prevents:
+
+```text
+Person A → ID 7
+Person B → ID 12
+
+crossing
+
+Person A → ID 12 ❌
+Person B → ID 7  ❌
+```
+
+and preserves:
+
+```text
+Person A → ID 7
+Person B → ID 12
+```
+
+---
+
+# 23. Important implementation rule
+
+Before changing code, inspect the existing implementation and adapt to its current interfaces.
+
+Do not blindly add duplicate classes or duplicate state machines.
+
+Do not rewrite working components simply to make the implementation cleaner.
+
+Make the **smallest robust changes necessary** to improve:
+
+1. direction-aware association
+2. crossing handling
+3. occlusion recovery
+4. identity preservation
+5. ID-switch diagnostics
+
+The goal is a stable **V06.x improvement**, not a complete rewrite.
+
+After implementation, show the exact code changes and explain the reasoning behind each major modification.

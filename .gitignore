@@ -1,0 +1,39 @@
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+app/.env
+.streamlit/secrets.toml
+*.pem
+app/ca.pem
+*.key
+*.p12
+*.pfx
+
+# Personal data and generated files
+known_people/
+SampleData/
+output/
+*.csv
+*.json
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local environments and caches
+my_tracker_project/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Model artifacts are ignored everywhere except the deployment model directory.
+*.pt
+*.pth
+*.onnx
+!Models/
+!Models/**
+
+# OS files
+.DS_Store
+Thumbs.db
