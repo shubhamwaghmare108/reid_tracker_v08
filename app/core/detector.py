@@ -1,6 +1,7 @@
 """YOLO11-seg detection + Ultralytics built-in multi-object tracking adapter."""
 from __future__ import annotations
 from dataclasses import dataclass
+import os
 import time
 import cv2
 import numpy as np
@@ -19,20 +20,20 @@ class Detection:
 class PersonDetector:
     """Run YOLO11-seg with an Ultralytics tracker and expose local masks.
 
-    YOLO owns short-term geometric association/track IDs. V08 Re-IDTracker
+    YOLO owns short-term geometric association/track IDs. V08 ReIDTracker
     remains responsible for conservative appearance identity, occlusion
     recovery, gallery protection, face/person arbitration, and metrics.
     """
     def __init__(self, model_name: str, confidence: float = 0.35,
-                 device: str = '', tracker: str = 'bytetrack.yaml'):
+                 device: str = '', tracker: str | None = None):
         self.model = YOLO(model_name)
-        self.confidence, self.device, self.tracker = confidence, device, tracker
+        self.confidence = confidence
+        self.device = device
+        self.tracker = tracker or os.getenv('REID_YOLO_TRACKER', 'bytetrack.yaml')
         self.last_profile = {}
-        self._started = False
 
     def reset(self) -> None:
         """Reset the persistent Ultralytics tracker state."""
-        self._started = False
         predictor = getattr(self.model, 'predictor', None)
         if predictor is not None:
             predictor.trackers = None
@@ -53,10 +54,11 @@ class PersonDetector:
             verbose=False,
         )
         result = results[0]
-        yolo_ms = (time.perf_counter() - started) * 1000.0
         self.last_profile = {
-            'yolo_ms': yolo_ms, 'mask_transfer_ms': 0.0,
-            'mask_resize_ms': 0.0, 'mask_count': 0,
+            'yolo_ms': (time.perf_counter() - started) * 1000.0,
+            'mask_transfer_ms': 0.0,
+            'mask_resize_ms': 0.0,
+            'mask_count': 0,
             'yolo_tracker_ids': 0,
         }
         if result.boxes is None or len(result.boxes) == 0:
