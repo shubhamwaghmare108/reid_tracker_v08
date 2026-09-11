@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +10,6 @@ load_dotenv(PROJECT_ROOT / '.env')
 
 
 def _setting(name: str, default: str) -> str:
-    """Read a setting from environment, Streamlit secrets, or a default."""
     value = os.getenv(name)
     if value is not None:
         return value
@@ -28,12 +26,10 @@ def _setting(name: str, default: str) -> str:
 
 
 def database_timestamp() -> datetime:
-    """Return the current UTC time as a naive datetime for MySQL DATETIME."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _resolve_device(device: str) -> str:
-    """Resolve the project-level ``auto`` device to a PyTorch device string."""
     normalized = str(device or 'auto').strip().lower()
     if normalized != 'auto':
         return normalized
@@ -46,7 +42,6 @@ def _resolve_device(device: str) -> str:
 
 @dataclass(frozen=True)
 class TrackingConfig:
-    """Settings controlling frame scheduling and expensive inference."""
     detection_interval: int = 1
     reid_interval: int = 5
     reid_batch_size: int = 4
@@ -63,9 +58,10 @@ class TrackingConfig:
 
 @dataclass
 class Settings:
-    """Complete runtime configuration for detection, tracking, and storage."""
     project_root: Path = Path(_setting('REID_PROJECT_ROOT', str(PROJECT_ROOT)))
-    detector_model: str | Path = Path('Models') / 'best.pt'
+    # V09: YOLO11 small segmentation model is now the detector/tracker front end.
+    detector_model: str | Path = Path('Models') / 'yolo11s-seg.pt'
+    detector_tracker: str = _setting('REID_YOLO_TRACKER', 'bytetrack.yaml')
     reid_model: str = 'osnet_x1_0'
     reid_weights: str | Path = Path('Models') / 'osnet_x1_0_market_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip.pth'
     device: str = _setting('REID_DEVICE', 'auto')
@@ -75,10 +71,8 @@ class Settings:
     gallery_dir: Path | None = None
     output_dir: Path | None = None
     tracking_config: TrackingConfig = field(default_factory=TrackingConfig)
-
     hybrid_weight_body: float = 0.5
     hybrid_weight_face: float = 0.5
-
     tracker_max_lost_frames: int = int(_setting('REID_TRACKER_MAX_LOST_FRAMES', '8'))
     tracker_max_occlusion_frames: int = int(_setting('REID_TRACKER_MAX_OCCLUSION_FRAMES', '6'))
     tracker_max_recovery_frames: int = int(_setting('REID_TRACKER_MAX_RECOVERY_FRAMES', '24'))
@@ -123,17 +117,14 @@ class Settings:
     tracker_association_min_iou: float = float(_setting('REID_TRACKER_ASSOCIATION_MIN_IOU', '0.01'))
     tracker_association_max_scale_change: float = float(_setting('REID_TRACKER_ASSOCIATION_MAX_SCALE_CHANGE', '2.50'))
     tracker_gallery_min_detection_confidence: float = float(_setting('REID_TRACKER_GALLERY_MIN_DETECTION_CONFIDENCE', '0.70'))
-
     metrics_enabled: bool = _setting('METRICS_ENABLED', 'true').lower() == 'true'
     metrics_event_logging: bool = _setting('METRICS_EVENT_LOGGING', 'true').lower() == 'true'
     metrics_output_dir: Path = Path(_setting('METRICS_OUTPUT_DIR', 'results'))
     metrics_log_detections: bool = _setting('METRICS_LOG_DETECTIONS', 'false').lower() == 'true'
     metrics_flush_size: int = int(_setting('METRICS_FLUSH_SIZE', '500'))
-
     face_model: str = 'buffalo_l'
     face_det_size: tuple[int, int] = (640, 640)
     face_det_threshold: float = 0.5
-
     mysql_host: str = _setting('REID_MYSQL_HOST', '')
     mysql_port: int = int(_setting('REID_MYSQL_PORT', '3306'))
     mysql_user: str = _setting('REID_MYSQL_USER', '')
@@ -141,7 +132,6 @@ class Settings:
     mysql_database: str = _setting('REID_MYSQL_DATABASE', '')
 
     def __post_init__(self) -> None:
-        """Normalize derived paths and nested configuration."""
         self.device = _resolve_device(self.device)
         self.gallery_dir = self.gallery_dir or self.project_root / 'known_people'
         self.output_dir = self.output_dir or self.project_root / 'output'
